@@ -906,7 +906,6 @@ doSubmitMsg(ptcpsess_t *pThis, struct syslogTime *stTime, time_t ttGenTime, mult
 	CHKiRet(msgConstructWithTime(&pMsg, stTime, ttGenTime));
 	MsgSetRawMsg(pMsg, (char*)pThis->pMsg, pThis->iMsg);
 	MsgSetInputName(pMsg, pSrv->pInputName);
-	MsgSetFlowControlType(pMsg, eFLOWCTL_LIGHT_DELAY);
 	if(pSrv->dfltTZ != NULL)
 		MsgSetDfltTZ(pMsg, (char*) pSrv->dfltTZ);
 	MsgSetFlowControlType(pMsg, pSrv->flowControl
