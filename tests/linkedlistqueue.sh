@@ -7,7 +7,7 @@ generate_conf
 add_conf '
 $ModLoad ../plugins/imtcp/.libs/imtcp
 $MainMsgQueueTimeoutShutdown 10000
-$InputTCPServerRun 13514
+$InputTCPServerRun '$TCPFLOOD_PORT'
 
 $ErrorMessagesToStderr off
 
@@ -19,7 +19,7 @@ template(name="dynfile" type="string" string=`echo $RSYSLOG_OUT_LOG`) # trick to
 :msg, contains, "msgnum:" ?dynfile;outfmt
 '
 startup
-. $srcdir/diag.sh injectmsg  0 40000
+injectmsg  0 40000
 shutdown_when_empty
 wait_shutdown 
 seq_check 0 39999

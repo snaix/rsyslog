@@ -36,7 +36,6 @@
  * limitations under the License.
  */
 #include "config.h"
-#include "rsyslog.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -53,7 +52,7 @@
 #	include <pthread.h>
 #endif
 
-
+#include "rsyslog.h"
 #include "conf.h"
 #include "syslogd-types.h"
 #include "srUtils.h"
@@ -1324,7 +1323,7 @@ CODESTARTnewActInst
 
 	if(pData->fname == NULL || *pData->fname == '\0') {
 		parser_errmsg("omfile: either the \"file\" or "
-				"\"dynfile\" parameter must be given");
+				"\"dynafile\" parameter must be given");
 		ABORT_FINALIZE(RS_RET_MISSING_CNFPARAMS);
 	}
 
@@ -1336,7 +1335,7 @@ CODESTARTnewActInst
 		}
 	}
 	if(allWhiteSpace) {
-		parser_errmsg("omfile: \"file\" or \"dynfile\" parameter "
+		parser_errmsg("omfile: \"file\" or \"dynafile\" parameter "
 			"consist only of whitespace - this is not permitted");
 		ABORT_FINALIZE(RS_RET_MISSING_CNFPARAMS);
 	}

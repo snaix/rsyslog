@@ -13,7 +13,7 @@ template(name="numbers" type="string" string="nos: %$!some_nos%\n")
 
 module(load="../plugins/mmnormalize/.libs/mmnormalize" allowRegex="off")
 module(load="../plugins/imptcp/.libs/imptcp")
-input(type="imptcp" port="13514")
+input(type="imptcp" port="'$TCPFLOOD_PORT'")
 
 action(type="mmnormalize" rulebase=`echo $srcdir/testsuites/mmnormalize_regex.rulebase`)
 action(type="omfile" file=`echo $RSYSLOG_OUT_LOG` template="hosts_and_ports")
@@ -24,5 +24,5 @@ echo doing shutdown
 shutdown_when_empty
 echo wait on shutdown
 wait_shutdown 
-. $srcdir/diag.sh assert-content-missing '192' #several ips in input are 192.168.1.0/24
+assert_content_missing '192' #several ips in input are 192.168.1.0/24
 exit_test

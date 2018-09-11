@@ -17,7 +17,7 @@ generate_conf
 add_conf '
 $ModLoad ../plugins/omruleset/.libs/omruleset
 $ModLoad ../plugins/imtcp/.libs/imtcp
-$InputTCPServerRun 13514
+$InputTCPServerRun '$TCPFLOOD_PORT'
 
 $ruleset rsinclude
 $template outfmt,"%msg:F,58:2%\n"
@@ -29,7 +29,7 @@ $ActionOmrulesetRulesetName rsinclude
 *.* :omruleset:
 '
 startup
-. $srcdir/diag.sh injectmsg  0 5000
+injectmsg  0 5000
 echo doing shutdown
 shutdown_when_empty
 echo wait on shutdown

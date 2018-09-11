@@ -4,7 +4,7 @@
 generate_conf
 add_conf '
 module(load="../plugins/imtcp/.libs/imtcp")
-input(type="imtcp" port="13514")
+input(type="imtcp" port="'$TCPFLOOD_PORT'")
 template(name="outfmt" type="string" string="%$!%\n")
 
 local4.* {
@@ -17,7 +17,7 @@ startup_vg
 tcpflood -m1
 shutdown_when_empty
 wait_shutdown_vg
-. $srcdir/diag.sh check-exit-vg
+check_exit_vg
 
 # Our fixed and calculated expected results
 EXPECTED='{ "parsed": { "c1": "data" } }'

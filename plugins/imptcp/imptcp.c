@@ -145,6 +145,7 @@ struct instanceConf_s {
 	sbool multiLine;
 	uint8_t compressionMode;
 	uchar *pszBindPort;		/* port to bind to */
+	uchar *pszLstnPortFileName;	/* Name of the file with dynamic port used by testbench*/
 	uchar *pszBindAddr;		/* IP to bind socket to */
 	uchar *pszBindPath;     /* Path to bind socket to */
 	uchar *pszBindRuleset;		/* name of ruleset to bind to */
@@ -221,6 +222,7 @@ static struct cnfparamdescr inppdescr[] = {
 	{ "ratelimit.interval", eCmdHdlrInt, 0 },
 	{ "ratelimit.burst", eCmdHdlrInt, 0 },
 	{ "multiline", eCmdHdlrBinary, 0 },
+	{ "listenportfilename", eCmdHdlrString, 0 },
 	{ "socketbacklog", eCmdHdlrInt, 0 }
 };
 static struct cnfparamblk inppblk =
@@ -254,6 +256,7 @@ struct ptcpsrv_s {
 	int	bFailOnPerms;	/* fail creation if chown fails? */
 	sbool bUnixSocket;
 	int socketBacklog;
+	uchar *pszLstnPortFileName;
 	int iAddtlFrameDelim;
 	sbool multiLine;
 	int iKeepAliveIntvl;
@@ -409,6 +412,8 @@ destructSrv(ptcpsrv_t *pSrv)
 		free(pSrv->pszInputName);
 	if(pSrv->port != NULL)
 		free(pSrv->port);
+	if(pSrv->pszLstnPortFileName)
+		free(pSrv->pszLstnPortFileName);
 	if(pSrv->path != NULL)
 		free(pSrv->path);
 	if(pSrv->lstnIP != NULL)
@@ -459,6 +464,8 @@ static rsRetVal startupUXSrv(ptcpsrv_t *pSrv) {
 		ABORT_FINALIZE(RS_RET_ERR_CRE_AFUX);
 	}
 
+//	dbgprintf("pascal: listenportfilename = %s\n", pSrv->pszLstnPortFileName);
+
 	if (listen(sock, pSrv->socketBacklog) < 0) {
 		LogError(errno, RS_RET_ERR_CRE_AFUX, "imptcp: unix socket listen error");
 		ABORT_FINALIZE(RS_RET_ERR_CRE_AFUX);
@@ -494,6 +501,8 @@ finalize_it:
  * Does NOT yet accept/process any incoming data (but binds ports). Hint: this
  * code is to be executed before dropping privileges.
  */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
 static rsRetVal
 startupSrv(ptcpsrv_t *pSrv)
 {
@@ -605,10 +614,30 @@ startupSrv(ptcpsrv_t *pSrv)
 			/* TODO: check if *we* bound the socket - else we *have* an error! */
 			char errStr[1024];
 			rs_strerror_r(errno, errStr, sizeof(errStr));
+			LogError(errno, NO_ERRCODE, "Error while binding tcp socket");
 			dbgprintf("error %d while binding tcp socket: %s\n", errno, errStr);
 			close(sock);
 			sock = -1;
 			continue;
+		}
+
+		if(pSrv->pszLstnPortFileName) {
+			FILE *fp;
+			if(getsockname(sock, r->ai_addr, &r->ai_addrlen) == -1) {
+				LogError(errno, NO_ERRCODE, "imptcp: ListenPortFileName: getsockname:"
+						"error while trying to get socket");
+			}
+			if((fp = fopen((const char*)pSrv->pszLstnPortFileName, "w+")) == NULL) {
+				LogError(errno, RS_RET_IO_ERROR, "imptcp: ListenPortFileName: "
+						"error while trying to open file");
+				ABORT_FINALIZE(RS_RET_IO_ERROR);
+			}
+			if(isIPv6) {
+				fprintf(fp, "%d", ntohs((((struct sockaddr_in6*)r->ai_addr)->sin6_port)));
+			} else {
+				fprintf(fp, "%d", ntohs((((struct sockaddr_in*)r->ai_addr)->sin_port)));
+			}
+			fclose(fp);
 		}
 
 		if(listen(sock, pSrv->socketBacklog) < 0) {
@@ -648,7 +677,7 @@ finalize_it:
 
 	RETiRet;
 }
-
+#pragma GCC diagnostic pop
 
 /* Set pRemHost based on the address provided. This is to be called upon accept()ing
  * a connection request. It must be provided by the socket we received the
@@ -1592,6 +1621,7 @@ createInstance(instanceConf_t **pinst)
 	inst->compressionMode = COMPRESS_SINGLE_MSG;
 	inst->multiLine = 0;
 	inst->socketBacklog = 5;
+	inst->pszLstnPortFileName = NULL;
 
 	/* node created, let's add to config */
 	if(loadModConf->tail == NULL) {
@@ -1683,6 +1713,7 @@ addListner(modConfData_t __attribute__((unused)) *modConf, instanceConf_t *inst)
 	pSrv->iAddtlFrameDelim = inst->iAddtlFrameDelim;
 	pSrv->multiLine = inst->multiLine;
 	pSrv->socketBacklog = inst->socketBacklog;
+	pSrv->pszLstnPortFileName = inst->pszLstnPortFileName;
 	pSrv->maxFrameSize = inst->maxFrameSize;
 	if (inst->pszBindAddr == NULL) {
 		pSrv->lstnIP = NULL;
@@ -2172,6 +2203,8 @@ CODESTARTnewInpInst
 			inst->ratelimitInterval = (int) pvals[i].val.d.n;
 		} else if(!strcmp(inppblk.descr[i].name, "multiline")) {
 			inst->multiLine = (sbool) pvals[i].val.d.n;
+		} else if(!strcmp(inppblk.descr[i].name, "listenportfilename")) {
+			inst->pszLstnPortFileName =  (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
 		} else if(!strcmp(inppblk.descr[i].name, "socketbacklog")) {
 			inst->socketBacklog = (int) pvals[i].val.d.n;
 		} else {

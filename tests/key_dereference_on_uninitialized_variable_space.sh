@@ -17,7 +17,7 @@ ruleset(name="echo") {
   action(type="omfile" file=`echo $RSYSLOG_OUT_LOG` template="corge")
 }
 
-input(type="imtcp" port="13514")
+input(type="imtcp" port="'$TCPFLOOD_PORT'")
 
 call echo
 '
@@ -27,5 +27,5 @@ echo doing shutdown
 shutdown_when_empty
 echo wait on shutdown
 wait_shutdown
-. $srcdir/diag.sh content-check 'cee:'
+content_check 'cee:'
 exit_test

@@ -62,15 +62,18 @@
 #include "stringbuf.h"
 #include "ruleset.h"
 #include "ratelimit.h"
+#include "srUtils.h"
 #include "parserif.h"
 
 #include <regex.h>
 
-MODULE_TYPE_INPUT	/* must be present for input modules, do not remove */
+MODULE_TYPE_INPUT
 MODULE_TYPE_NOKEEP
 MODULE_CNFNAME("imfile")
 
 /* defines */
+#define FILE_ID_HASH_SIZE 20	/* max size of a file_id hash */
+#define FILE_ID_SIZE	512	/* how many bytes are used for file-id? */
 
 /* Module static data */
 DEF_IMOD_STATIC_DATA	/* must be present, starts static data */
@@ -78,6 +81,9 @@ DEFobjCurrIf(glbl)
 DEFobjCurrIf(strm)
 DEFobjCurrIf(prop)
 DEFobjCurrIf(ruleset)
+
+extern int rs_siphash(const uint8_t *in, const size_t inlen, const uint8_t *k,
+	uint8_t *out, const size_t outlen); /* see siphash.c */
 
 static int bLegacyCnfModGlobalsPermitted;/* are legacy module-global config parameters permitted? */
 
@@ -123,6 +129,7 @@ struct instanceConf_s {
 	int iFacility;
 	int iSeverity;
 	int readTimeout;
+	unsigned delay_perMsg;
 	sbool bRMStateOnDel;
 	uint8_t readMode;
 	uchar *startRegex;
@@ -152,7 +159,7 @@ struct act_obj_s {
 	fs_edge_t *edge;	/* edge which this object belongs to */
 	char *name;		/* full path name of active object */
 	char *basename;		/* only basename */ //TODO: remove when refactoring rename support
-	char *source_name;  /* if this object is target of a symlink, source_name is its name (else NULL) */
+	char *source_name;	/* if this object is target of a symlink, source_name is its name (else NULL) */
 	//char *statefile;	/* base name of state file (for move operations) */
 	int wd;
 #if defined(OS_SOLARIS) && defined (HAVE_PORT_SOURCE_FILE)
@@ -171,18 +178,19 @@ struct act_obj_s {
 	int is_symlink;
 };
 struct fs_edge_s {
-	fs_node_t *parent;
+	fs_node_t *parent;	/* node pointing to this edge */
 	fs_node_t *node;	/* node this edge points to */
 	fs_edge_t *next;
 	uchar *name;
 	uchar *path;
 	act_obj_t *active;
 	int is_file;
-	int ninst;	/* nbr of instances in instarr */
+	int ninst;		/* nbr of instances in instarr */
 	instanceConf_t **instarr;
 };
 struct fs_node_s {
-	fs_edge_t *edges;
+	fs_edge_t *edges;	/* NULL in leaf nodes */
+	fs_node_t *root;	/* node one level up (NULL for file system root) */
 };
 
 
@@ -193,7 +201,8 @@ static rsRetVal ATTR_NONNULL(1) pollFile(act_obj_t *act);
 static int ATTR_NONNULL() getBasename(uchar *const __restrict__ basen, uchar *const __restrict__ path);
 static void ATTR_NONNULL() act_obj_unlink(act_obj_t *act);
 static uchar * ATTR_NONNULL(1, 2) getStateFileName(const act_obj_t *, uchar *, const size_t);
-static int ATTR_NONNULL() getFullStateFileName(const uchar *const, uchar *const pszout, const size_t ilenout);
+static int ATTR_NONNULL() getFullStateFileName(const uchar *const, const char *const,
+	uchar *const pszout, const size_t ilenout);
 
 
 #define OPMODE_POLLING 0
@@ -290,6 +299,7 @@ static struct cnfparamdescr inppdescr[] = {
 	{ "removestateondelete", eCmdHdlrBinary, 0 },
 	{ "persiststateinterval", eCmdHdlrInt, 0 },
 	{ "deletestateonfiledelete", eCmdHdlrBinary, 0 },
+	{ "delay.message", eCmdHdlrPositiveInt, 0 },
 	{ "addmetadata", eCmdHdlrBinary, 0 },
 	{ "addceetag", eCmdHdlrBinary, 0 },
 	{ "statefile", eCmdHdlrString, CNFPARAM_DEPRECATED },
@@ -348,7 +358,7 @@ OLD_openFileWithStateFile(act_obj_t *const act)
 		  act->name, statefn);
 
 	/* Get full path and file name */
-	lenSFNam = getFullStateFileName(statefn, pszSFNam, sizeof(pszSFNam));
+	lenSFNam = getFullStateFileName(statefn, "", pszSFNam, sizeof(pszSFNam));
 
 	/* check if the file exists */
 	if(stat((char*) pszSFNam, &stat_buf) == -1) {
@@ -762,22 +772,35 @@ static rsRetVal ATTR_NONNULL()
 process_symlink(fs_edge_t *const chld, const char *symlink)
 {
 	DEFiRet;
-	char *target = NULL;
-	CHKmalloc(target = realpath(symlink, target));
+	char *target;
+	CHKmalloc(target = realpath(symlink, NULL));
 	struct stat fileInfo;
 	if(lstat(target, &fileInfo) != 0) {
-		LogError(errno, RS_RET_ERR,	"imfile: process_symlink cannot stat file '%s' - ignored", target);
+		LogError(errno, RS_RET_ERR,	"imfile: process_symlink: cannot stat file '%s' - ignored", target);
 		FINALIZE;
 	}
 	const int is_file = (S_ISREG(fileInfo.st_mode));
 	DBGPRINTF("process_symlink:  found '%s', File: %d (config file: %d), symlink: %d\n",
 		target, is_file, chld->is_file, 0);
-	if(!is_file && S_ISREG(fileInfo.st_mode)) {
-		LogMsg(0, RS_RET_ERR, LOG_WARNING,
-			"imfile: '%s' is neither a regular file, symlink, nor a directory - ignored", target);
-		FINALIZE;
+	if (act_obj_add(chld, target, is_file, fileInfo.st_ino, 0, symlink) == RS_RET_OK) {
+		/* need to watch parent target as well for proper rotation support */
+		uint idx = ustrlen(chld->active->name) - ustrlen(chld->active->basename);
+		if (idx) { /* basename is different from name */
+			char parent[MAXFNAME];
+			idx--; /* move past trailing slash */
+			memcpy(parent, chld->active->name, idx);
+			parent[idx] = '\0';
+			if(lstat(parent, &fileInfo) != 0) {
+				LogError(errno, RS_RET_ERR,
+					"imfile: process_symlink: cannot stat directory '%s' - ignored", parent);
+				FINALIZE;
+			}
+			if (chld->parent->root->edges) {
+				DBGPRINTF("process_symlink: adding parent '%s' of target '%s'\n", parent, target);
+				act_obj_add(chld->parent->root->edges, parent, 0, fileInfo.st_ino, 0, NULL);
+			}
+		}
 	}
-	act_obj_add(chld, target, is_file, fileInfo.st_ino, 0, symlink);
 
 finalize_it:
 	free(target);
@@ -897,7 +920,7 @@ act_obj_destroy(act_obj_t *const act, const int is_deleted)
 		pollFile(act); /* get any left-over data */
 		if(inst->bRMStateOnDel) {
 			statefn = getStateFileName(act, statefile, sizeof(statefile));
-			getFullStateFileName(statefn, toDel, sizeof(toDel));
+			getFullStateFileName(statefn, "", toDel, sizeof(toDel)); // TODO: check!
 			statefn = toDel;
 		}
 		persistStrmState(act);
@@ -1025,6 +1048,7 @@ fs_node_walk(fs_node_t *const node,
  */
 static rsRetVal
 fs_node_add(fs_node_t *const node,
+	fs_node_t *const source,
 	const uchar *const toFind,
 	const size_t pathIdx,
 	instanceConf_t *const inst)
@@ -1053,6 +1077,7 @@ fs_node_add(fs_node_t *const node,
 	memcpy(name, toFind+pathIdx, len);
 	name[len] = '\0';
 	DBGPRINTF("fs_node_add: name '%s'\n", name);
+	node->root = source;
 
 	fs_edge_t *chld;
 	for(chld = node->edges ; chld != NULL ; chld = chld->next) {
@@ -1064,7 +1089,7 @@ fs_node_add(fs_node_t *const node,
 			chld->instarr[chld->ninst-1] = inst;
 			/* recurse */
 			if(!isFile) {
-				CHKiRet(fs_node_add(chld->node, toFind, nextPathIdx, inst));
+				CHKiRet(fs_node_add(chld->node, node, toFind, nextPathIdx, inst));
 			}
 			FINALIZE;
 		}
@@ -1086,7 +1111,7 @@ fs_node_add(fs_node_t *const node,
 	DBGPRINTF("fs_node_add(%p, '%s') returns %p\n", node, toFind, newchld->node);
 
 	if(!isFile) {
-		CHKiRet(fs_node_add(newchld->node, toFind, nextPathIdx, inst));
+		CHKiRet(fs_node_add(newchld->node, node, toFind, nextPathIdx, inst));
 	}
 
 	/* link to list */
@@ -1143,7 +1168,10 @@ fs_node_notify_file_del(act_obj_t *const act, const char *const name)
  * open or otherwise modify disk file state.
  */
 static int ATTR_NONNULL()
-getFullStateFileName(const uchar *const pszstatefile, uchar *const pszout, const size_t ilenout)
+getFullStateFileName(const uchar *const pszstatefile,
+	const char *const file_id,
+	uchar *const pszout,
+	const size_t ilenout)
 {
 	int lenout;
 	const uchar* pszworkdir;
@@ -1152,13 +1180,70 @@ getFullStateFileName(const uchar *const pszstatefile, uchar *const pszout, const
 	pszworkdir = glblGetWorkDirRaw();
 
 	/* Construct file name */
-	lenout = snprintf((char*)pszout, ilenout, "%s/%s",
-			     (char*) (pszworkdir == NULL ? "." : (char*) pszworkdir), (char*)pszstatefile);
+	lenout = snprintf((char*)pszout, ilenout, "%s/%s%s%s",
+		(char*) (pszworkdir == NULL ? "." : (char*) pszworkdir), (char*)pszstatefile,
+		(*file_id == '\0') ? "" : ":", file_id);
 
 	/* return out length */
 	return lenout;
 }
 
+
+/* hash function for file-id
+ * Takes a block of data and returns a string with the hash value.
+ *
+ * Currently one provided by Aaaron Wiebe based on perl's hashing algorithm
+ * (so probably pretty generic). Not for excessively large strings!
+ * TODO: re-think the hash function!
+ */
+#if defined(__clang__)
+#pragma GCC diagnostic ignored "-Wunknown-attributes"
+#endif
+static void __attribute__((nonnull(1,3)))
+#if defined(__clang__)
+__attribute__((no_sanitize("unsigned-integer-overflow")))
+#endif
+get_file_id_hash(const char *data, size_t lendata,
+	char *const hash_str, const size_t len_hash_str)
+{
+	assert(len_hash_str >= 17); /* we always generate 8-byte strings */
+
+	size_t i;
+	uint8_t out[8], k[16];
+	for (i = 0; i < 16; ++i)
+		k[i] = i;
+	memset(out, 0, sizeof(out));
+	rs_siphash((const uint8_t *)data, lendata, k, out, 8);
+
+	for(i = 0 ; i < 8 ; ++i) {
+		if(2 * i+1 >= len_hash_str)
+			break;
+		snprintf(hash_str+(2*i), 3, "%2.2x", out[i]);
+	}
+}
+
+
+/* this returns the file-id for a given file
+ */
+static void ATTR_NONNULL(1, 2)
+getFileID(const act_obj_t *const act, char *const buf, const size_t lenbuf)
+{
+	*buf = '\0'; /* default: empty hash, only set if file has sufficient data */
+	const int fd = open(act->name, O_RDONLY | O_CLOEXEC);
+	if(fd >= 0) {
+		char filedata[FILE_ID_SIZE];
+		const int r = read(fd, filedata, FILE_ID_SIZE);
+		if(r == FILE_ID_SIZE) {
+			get_file_id_hash(filedata, sizeof(filedata), buf, lenbuf);
+		} else {
+			DBGPRINTF("getFileID partial or error read, ret %d\n", r);
+		}
+		close(fd);
+	} else {
+		DBGPRINTF("getFileID open %s failed\n", act->name);
+	}
+	DBGPRINTF("getFileID for '%s', file_id_hash '%s'\n", act->name, buf);
+}
 
 /* this generates a state file name suitable for the given file. To avoid
  * malloc calls, it must be passed a buffer which should be MAXFNAME large.
@@ -1231,12 +1316,15 @@ enqLine(act_obj_t *const act,
 		metadata_values[1] = file_offset;
 		msgAddMultiMetadata(pMsg, metadata_names, metadata_values, 2);
 	}
+
+	if(inst->delay_perMsg) {
+		srSleep(inst->delay_perMsg % 1000000, inst->delay_perMsg / 1000000);
+	}
+
 	ratelimitAddMsg(act->ratelimiter, &act->multiSub, pMsg);
 finalize_it:
 	RETiRet;
 }
-
-
 /* try to open a file which has a state file. If the state file does not
  * exist or cannot be read, an error is returned.
  */
@@ -1246,22 +1334,48 @@ openFileWithStateFile(act_obj_t *const act)
 	DEFiRet;
 	uchar pszSFNam[MAXFNAME];
 	uchar statefile[MAXFNAME];
+	char file_id[FILE_ID_HASH_SIZE];
 	int fd = -1;
 	const instanceConf_t *const inst = act->edge->instarr[0];// TODO: same file, multiple instances?
 
 	uchar *const statefn = getStateFileName(act, statefile, sizeof(statefile));
+	getFileID(act, file_id, sizeof(file_id));
 
-	getFullStateFileName(statefn, pszSFNam, sizeof(pszSFNam));
+	getFullStateFileName(statefn, file_id, pszSFNam, sizeof(pszSFNam));
 	DBGPRINTF("trying to open state for '%s', state file '%s'\n", act->name, pszSFNam);
 
 	/* check if the file exists */
 	fd = open((char*)pszSFNam, O_CLOEXEC | O_NOCTTY | O_RDONLY, 0600);
 	if(fd < 0) {
 		if(errno == ENOENT) {
-			DBGPRINTF("NO state file (%s) exists for '%s' - trying to see if "
-				"old-style file exists\n", pszSFNam, act->name);
-			CHKiRet(OLD_openFileWithStateFile(act));
-			FINALIZE;
+			if(file_id[0] != '\0') {
+				const char *pszSFNamHash = strdup((const char*)pszSFNam);
+				CHKmalloc(pszSFNamHash);
+				DBGPRINTF("state file %s for %s does not exist - trying to see if "
+					"inode-only file exists\n", pszSFNam, act->name);
+				getFullStateFileName(statefn, "", pszSFNam, sizeof(pszSFNam));
+				fd = open((char*)pszSFNam, O_CLOEXEC | O_NOCTTY | O_RDONLY, 0600);
+				if(fd >= 0) {
+					/* we now can use identify the file, so let's rename it */
+					if(rename((const char*)pszSFNam, pszSFNamHash) != 0) {
+						LogError(errno, RS_RET_IO_ERROR,
+							"imfile error trying to rename state file for '%s' - "
+							"ignoring this error, usually this means a file no "
+							"longer file is left over, but this may also cause "
+							"some real trouble. Still the best we can do ",
+							act->name);
+						free((void*) pszSFNamHash);
+						ABORT_FINALIZE(RS_RET_IO_ERROR);
+					}
+				}
+				free((void*) pszSFNamHash);
+			}
+			if(fd < 0) {
+				DBGPRINTF("state file %s for %s does not exist - trying to see if "
+					"old-style file exists\n", pszSFNam, act->name);
+				CHKiRet(OLD_openFileWithStateFile(act));
+				FINALIZE;
+			}
 		} else {
 			LogError(errno, RS_RET_IO_ERROR,
 				"imfile error trying to access state file for '%s'",
@@ -1270,6 +1384,7 @@ openFileWithStateFile(act_obj_t *const act)
 		}
 	}
 
+	DBGPRINTF("opened state file %s for %s\n", pszSFNam, act->name);
 	CHKiRet(strm.Construct(&act->pStrm));
 
 	struct json_object *jval;
@@ -1500,6 +1615,7 @@ createInstance(instanceConf_t **const pinst)
 	inst->freshStartTail = 0;
 	inst->fileNotFoundError = 1;
 	inst->readTimeout = loadModConf->readTimeout;
+	inst->delay_perMsg = 0;
 
 	/* node created, let's add to config */
 	if(loadModConf->tail == NULL) {
@@ -1705,6 +1821,8 @@ CODESTARTnewInpInst
 			inst->bRMStateOnDel = (sbool) pvals[i].val.d.n; // TODO: duplicate!
 		} else if(!strcmp(inppblk.descr[i].name, "addmetadata")) {
 			inst->addMetadata = (sbool) pvals[i].val.d.n;
+		} else if(!strcmp(inppblk.descr[i].name, "delay.message")) {
+			inst->delay_perMsg = (unsigned) pvals[i].val.d.n;
 		} else if (!strcmp(inppblk.descr[i].name, "addceetag")) {
 			inst->addCeeTag = (sbool) pvals[i].val.d.n;
 		} else if(!strcmp(inppblk.descr[i].name, "freshstarttail")) {
@@ -1931,7 +2049,7 @@ CODESTARTactivateCnf
 					"be processed. Reason", inst->pszFileName);
 			}
 		}
-		fs_node_add(runModConf->conf_tree, inst->pszFileName, 0, inst);
+		fs_node_add(runModConf->conf_tree, NULL, inst->pszFileName, 0, inst);
 	}
 
 	if(Debug) {
@@ -2097,6 +2215,9 @@ flag_in_move(fs_edge_t *const edge, const char *name_moved)
 		} else {
 			DBGPRINTF("name check fails, '%s' != '%s'\n", act->basename, name_moved);
 		}
+	}
+	if (!act && edge->next) {
+		flag_in_move(edge->next, name_moved);
 	}
 }
 
@@ -2418,11 +2539,13 @@ static rsRetVal ATTR_NONNULL()
 persistStrmState(act_obj_t *const act)
 {
 	DEFiRet;
+	char file_id[FILE_ID_HASH_SIZE];
 	uchar statefile[MAXFNAME];
 	uchar statefname[MAXFNAME];
 
 	uchar *const statefn = getStateFileName(act, statefile, sizeof(statefile));
-	getFullStateFileName(statefn, statefname, sizeof(statefname));
+	getFileID(act, file_id, sizeof(file_id));
+	getFullStateFileName(statefn, file_id, statefname, sizeof(statefname));
 	DBGPRINTF("persisting state for '%s', state file '%s'\n", act->name, statefname);
 
 	struct json_object *jval = NULL;

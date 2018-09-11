@@ -13,35 +13,35 @@ add_conf '
 $ModLoad ../plugins/imtcp/.libs/imtcp
 $MainMsgQueueTimeoutShutdown 1
 $MainMsgQueueSaveOnShutdown on
-$InputTCPServerRun 13514
+$InputTCPServerRun '$TCPFLOOD_PORT'
 
 $ModLoad ../plugins/omtesting/.libs/omtesting
 
 # set spool locations and switch queue to disk-only mode
-$WorkDirectory test-spool
+$WorkDirectory '$RSYSLOG_DYNNAME'.spool
 $MainMsgQueueFilename mainq
-$IncludeConfig work-queuemode.conf
+$IncludeConfig '${RSYSLOG_DYNNAME}'work-queuemode.conf
 
 $template outfmt,"%msg:F,58:2%\n"
 template(name="dynfile" type="string" string=`echo $RSYSLOG_OUT_LOG`) # trick to use relative path names!
 :msg, contains, "msgnum:" ?dynfile;outfmt
 
-$IncludeConfig work-delay.conf
+$IncludeConfig '${RSYSLOG_DYNNAME}'work-delay.conf
 '
 # prepare config
-echo \$MainMsgQueueType $1 > work-queuemode.conf
-echo "*.*     :omtesting:sleep 0 1000" > work-delay.conf
+echo \$MainMsgQueueType $1 > ${RSYSLOG_DYNNAME}work-queuemode.conf
+echo "*.*     :omtesting:sleep 0 1000" > ${RSYSLOG_DYNNAME}work-delay.conf
 
 # inject 5000 msgs, so that we do not hit the high watermark
 startup
-. $srcdir/diag.sh injectmsg 0 5000
+injectmsg 0 5000
 . $srcdir/diag.sh shutdown-immediate
 wait_shutdown
 . $srcdir/diag.sh check-mainq-spool
 
 # restart engine and have rest processed
 #remove delay
-echo "#" > work-delay.conf
+echo "#" > ${RSYSLOG_DYNNAME}work-delay.conf
 startup
 shutdown_when_empty # shut down rsyslogd when done processing messages
 ./msleep 1000

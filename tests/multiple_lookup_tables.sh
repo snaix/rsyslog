@@ -26,29 +26,29 @@ action(type="omfile" file=`echo $RSYSLOG_OUT_LOG` template="outfmt")
 cp -f $srcdir/testsuites/xlate.lkp_tbl xlate.lkp_tbl
 cp -f $srcdir/testsuites/xlate.lkp_tbl xlate_1.lkp_tbl
 startup
-. $srcdir/diag.sh injectmsg  0 3
-. $srcdir/diag.sh wait-queueempty
-. $srcdir/diag.sh content-check "msgnum:00000000: 0_foo_old 1_foo_old"
-. $srcdir/diag.sh content-check "msgnum:00000001: 0_bar_old 1_bar_old"
-. $srcdir/diag.sh assert-content-missing "baz"
+injectmsg  0 3
+wait_queueempty
+content_check "msgnum:00000000: 0_foo_old 1_foo_old"
+content_check "msgnum:00000001: 0_bar_old 1_bar_old"
+assert_content_missing "baz"
 cp -f $srcdir/testsuites/xlate_more.lkp_tbl xlate.lkp_tbl
-. $srcdir/diag.sh issue-HUP
-. $srcdir/diag.sh await-lookup-table-reload
-. $srcdir/diag.sh injectmsg  0 3
-. $srcdir/diag.sh wait-queueempty
-. $srcdir/diag.sh content-check "msgnum:00000000: 0_foo_new 1_foo_old"
-. $srcdir/diag.sh content-check "msgnum:00000001: 0_bar_new 1_bar_old"
-. $srcdir/diag.sh content-check "msgnum:00000002: 0_baz"
-. $srcdir/diag.sh assert-content-missing "1_baz"
+issue_HUP
+await_lookup_table_reload
+injectmsg  0 3
+wait_queueempty
+content_check "msgnum:00000000: 0_foo_new 1_foo_old"
+content_check "msgnum:00000001: 0_bar_new 1_bar_old"
+content_check "msgnum:00000002: 0_baz"
+assert_content_missing "1_baz"
 cp -f $srcdir/testsuites/xlate_more.lkp_tbl xlate_1.lkp_tbl
-. $srcdir/diag.sh issue-HUP
-. $srcdir/diag.sh await-lookup-table-reload
-. $srcdir/diag.sh injectmsg  0 3
+issue_HUP
+await_lookup_table_reload
+injectmsg  0 3
 echo doing shutdown
 shutdown_when_empty
 echo wait on shutdown
 wait_shutdown
-. $srcdir/diag.sh content-check "msgnum:00000000: 0_foo_new 1_foo_new"
-. $srcdir/diag.sh content-check "msgnum:00000001: 0_bar_new 1_bar_new"
-. $srcdir/diag.sh content-check "msgnum:00000002: 0_baz 1_baz"
+content_check "msgnum:00000000: 0_foo_new 1_foo_new"
+content_check "msgnum:00000001: 0_bar_new 1_bar_new"
+content_check "msgnum:00000002: 0_baz 1_baz"
 exit_test

@@ -18,7 +18,7 @@ module(load="../plugins/imtcp/.libs/imtcp")
 
 template(name="outfmt" type="string" string="%$!rfc5424-sd!tcpflood@32473!msgnum%\n")
 
-input(type="imtcp" port="13514")
+input(type="imtcp" port="'$TCPFLOOD_PORT'")
 
 action(type="mmpstrucdata")
 if $msg contains "msgnum" then
@@ -29,6 +29,6 @@ sleep 1
 tcpflood -m100 -y
 shutdown_when_empty # shut down rsyslogd when done processing messages
 wait_shutdown_vg
-. $srcdir/diag.sh check-exit-vg
+check_exit_vg
 seq_check 0 99
 exit_test

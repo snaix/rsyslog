@@ -8,7 +8,7 @@ generate_conf
 add_conf '
 module(load="../plugins/mmjsonparse/.libs/mmjsonparse")
 module(load="../plugins/imtcp/.libs/imtcp")
-input(type="imtcp" port="13514")
+input(type="imtcp" port="'$TCPFLOOD_PORT'")
 
 # we must make sure the template contains references to the variables
 template(name="outfmt" type="string" string="json prop:%$!val%  local prop:%$.val%  global prop:%$/val%\n")
@@ -34,5 +34,5 @@ echo doing shutdown
 shutdown_when_empty
 echo wait on shutdown
 wait_shutdown
-. $srcdir/diag.sh content-check  "json prop:abc  local prop:def  global prop:ghi"
+content_check  "json prop:abc  local prop:def  global prop:ghi"
 exit_test

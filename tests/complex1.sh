@@ -3,17 +3,11 @@
 #
 # added 2010-03-16 by Rgerhards
 #
-# This file is part of the rsyslog project, released  under GPLv3
-echo ====================================================================================
-echo TEST: \[complex1.sh\]: complex test with gzip and multiple action queues
-
-uname
-if [ `uname` = "SunOS" ] ; then
-   echo "This test currently does not work on all flavors of Solaris."
-   exit 77
-fi
-
+# This file is part of the rsyslog project, released under ASL 2.0
 . $srcdir/diag.sh init
+skip_platform "SunOS"  "This test currently does not work on all flavors of Solaris."
+export RSYSLOG_PORT2="$(get_free_port)"
+export RSYSLOG_PORT3="$(get_free_port)"
 generate_conf
 add_conf '
 $MaxMessageSize 10k
@@ -24,7 +18,7 @@ $ModLoad ../plugins/imtcp/.libs/imtcp
 $MainMsgQueueTimeoutShutdown 10000
 
 $template outfmt,"%msg:F,58:3%,%msg:F,58:4%,%msg:F,58:5%\n"
-$template dynfile,"rsyslog.out.%inputname%.%msg:F,58:2%.log"
+$template dynfile,"'$RSYSLOG_DYNNAME'.out.%inputname%.%msg:F,58:2%.log.Z"
 
 ## RULESET with listener
 $Ruleset R13514
@@ -45,13 +39,13 @@ $DynaFileCacheSize 4
 $omfileFlushInterval 1
 *.* ?dynfile;outfmt
 # listener
-$InputTCPServerInputName 13514
+$InputTCPServerInputName '$TCPFLOOD_PORT'
 $InputTCPServerBindRuleset R13514
-$InputTCPServerRun 13514
+$InputTCPServerRun '$TCPFLOOD_PORT'
 
 
 ## RULESET with listener
-$Ruleset R13515
+$Ruleset R_PORT2
 # queue params:
 $ActionQueueTimeoutShutdown 60000
 $ActionQueueTimeoutEnqueue 5000
@@ -69,14 +63,14 @@ $DynaFileCacheSize 4
 $omfileFlushInterval 1
 *.* ?dynfile;outfmt
 # listener
-$InputTCPServerInputName 13515
-$InputTCPServerBindRuleset R13515
-$InputTCPServerRun 13515
+$InputTCPServerInputName '$RSYSLOG_PORT2'
+$InputTCPServerBindRuleset R_PORT2
+$InputTCPServerRun '$RSYSLOG_PORT2'
 
 
 
 ## RULESET with listener
-$Ruleset R13516
+$Ruleset R_PORT3
 # queue params:
 $ActionQueueTimeoutShutdown 60000
 $ActionQueueTimeoutEnqueue 5000
@@ -94,21 +88,21 @@ $DynaFileCacheSize 4
 $omfileFlushInterval 1
 *.* ?dynfile;outfmt
 # listener
-$InputTCPServerInputName 13516
-$InputTCPServerBindRuleset R13516
-$InputTCPServerRun 13516
+$InputTCPServerInputName '$RSYSLOG_PORT3'
+$InputTCPServerBindRuleset R_PORT3
+$InputTCPServerRun '$RSYSLOG_PORT3'
 '
 # uncomment for debugging support:
 #export RSYSLOG_DEBUG="debug nostdout"
 #export RSYSLOG_DEBUGLOG="log"
 startup
 # send 40,000 messages of 400 bytes plus header max, via three dest ports
+export TCPFLOOD_PORT="$TCPFLOOD_PORT:$RSYSLOG_PORT2:$RSYSLOG_PORT3"
 tcpflood -m40000 -rd400 -P129 -f5 -n3 -c15 -i1
-sleep 4 # due to large messages, we need this time for the tcp receiver to settle...
 shutdown_when_empty # shut down rsyslogd when done processing messages
 wait_shutdown       # and wait for it to terminate
-ls rsyslog.out.*.log
-. $srcdir/diag.sh setzcat		   # find out which zcat to use
-$ZCAT rsyslog.out.*.log > $RSYSLOG_OUT_LOG
+ls $RSYSLOG_DYNNAME.out.*.log.Z
+gunzip $RSYSLOG_DYNNAME.out.*.log.Z
+cat $RSYSLOG_DYNNAME.out.*.log > $RSYSLOG_OUT_LOG
 seq_check 1 40000 -E
 exit_test

@@ -21,7 +21,7 @@
  * File begun on 2007-12-21 by RGerhards (extracted from syslogd.c[which was
  * licensed under BSD at the time of the rsyslog fork])
  *
- * Copyright 2007-2016 Adiscon GmbH.
+ * Copyright 2007-2018 Adiscon GmbH.
  *
  * This file is part of rsyslog.
  *
@@ -52,6 +52,7 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <sys/types.h>
+#include <signal.h>
 #include <sys/socket.h>
 #if HAVE_FCNTL_H
 #include <fcntl.h>
@@ -382,20 +383,11 @@ initTCPListener(tcpsrv_t *pThis, tcpLstnPortList_t *pPortEntry)
 	ISOBJ_TYPE_assert(pThis, tcpsrv);
 	assert(pPortEntry != NULL);
 
-	if(!ustrcmp(pPortEntry->pszPort, UCHAR_CONSTANT("0")))
-		TCPLstnPort = UCHAR_CONSTANT("514");
-		/* use default - we can not do service db update, because there is
-		 * no IANA-assignment for syslog/tcp. In the long term, we might
-		 * re-use RFC 3195 port of 601, but that would probably break to
-		 * many existing configurations.
-		 * rgerhards, 2007-06-28
-		 */
-	else
-		TCPLstnPort = pPortEntry->pszPort;
+	TCPLstnPort = pPortEntry->pszPort;
 
 	// pPortEntry->pszAddr = NULL ==> bind to all interfaces
 	CHKiRet(netstrm.LstnInit(pThis->pNS, (void*)pPortEntry, addTcpLstn, TCPLstnPort,
-	pPortEntry->pszAddr, pThis->iSessMax));
+	pPortEntry->pszAddr, pThis->iSessMax, pThis->pszLstnPortFileName));
 
 finalize_it:
 	RETiRet;
@@ -495,6 +487,15 @@ SessAccept(tcpsrv_t *pThis, tcpLstnPortList_t *pLstnInfo, tcps_sess_t **ppSess, 
 
 	/* get the host name */
 	CHKiRet(netstrm.GetRemoteHName(pNewStrm, &fromHostFQDN));
+	if (!pThis->bPreserveCase) {
+		/* preserve_case = off */
+		uchar *p;
+		for(p = fromHostFQDN; *p; p++) {
+			if (isupper((int) *p)) {
+				*p = tolower((int) *p);
+			}
+		}
+	}
 	CHKiRet(netstrm.GetRemoteIP(pNewStrm, &fromHostIP));
 	CHKiRet(netstrm.GetRemAddr(pNewStrm, &addr));
 	/* TODO: check if we need to strip the domain name here -- rgerhards, 2008-04-24 */
@@ -669,6 +670,11 @@ static void * ATTR_NONNULL(1)
 wrkr(void *const myself)
 {
 	struct wrkrInfo_s *const me = (struct wrkrInfo_s*) myself;
+
+	/* block signals for this thread */
+	sigset_t sigSet;
+	sigfillset(&sigSet);
+	pthread_sigmask(SIG_SETMASK, &sigSet, NULL);
 	
 	pthread_mutex_lock(&wrkrMut);
 	while(1) {
@@ -1001,6 +1007,7 @@ BEGINobjConstruct(tcpsrv) /* be sure to specify the object type also in END macr
 	pThis->ratelimitBurst = 10000;
 	pThis->bUseFlowControl = 1;
 	pThis->pszDrvrName = NULL;
+	pThis->bPreserveCase = 1; /* preserve case in fromhost; default to true. */
 ENDobjConstruct(tcpsrv)
 
 
@@ -1200,6 +1207,16 @@ SetGnutlsPriorityString(tcpsrv_t *pThis, uchar *iVal)
 	DBGPRINTF("tcpsrv: gnutlsPriorityString set to %s\n",
 		(iVal == NULL) ? "(null)" : (const char*) iVal);
 	pThis->gnutlsPriorityString = iVal;
+	RETiRet;
+}
+
+static rsRetVal
+SetLstnPortFileName(tcpsrv_t *pThis, uchar *iVal)
+{
+	DEFiRet;
+	DBGPRINTF("tcpsrv: LstnPortFileName set to %s\n",
+		(iVal == NULL) ? "(null)" : (const char*) iVal);
+	pThis->pszLstnPortFileName = iVal;
 	RETiRet;
 }
 
@@ -1433,6 +1450,16 @@ SetSessMax(tcpsrv_t *pThis, int iMax)
 }
 
 
+static rsRetVal
+SetPreserveCase(tcpsrv_t *pThis, int bPreserveCase)
+{
+	DEFiRet;
+	ISOBJ_TYPE_assert(pThis, tcpsrv);
+	pThis-> bPreserveCase = bPreserveCase;
+	RETiRet;
+}
+
+
 /* queryInterface function
  * rgerhards, 2008-02-29
  */
@@ -1461,6 +1488,7 @@ CODESTARTobjQueryInterface(tcpsrv)
 	pIf->SetKeepAliveProbes = SetKeepAliveProbes;
 	pIf->SetKeepAliveTime = SetKeepAliveTime;
 	pIf->SetGnutlsPriorityString = SetGnutlsPriorityString;
+	pIf->SetLstnPortFileName = SetLstnPortFileName;
 	pIf->SetUsrP = SetUsrP;
 	pIf->SetInputName = SetInputName;
 	pIf->SetOrigin = SetOrigin;
@@ -1491,6 +1519,7 @@ CODESTARTobjQueryInterface(tcpsrv)
 	pIf->SetRuleset = SetRuleset;
 	pIf->SetLinuxLikeRatelimiters = SetLinuxLikeRatelimiters;
 	pIf->SetNotificationOnRemoteClose = SetNotificationOnRemoteClose;
+	pIf->SetPreserveCase = SetPreserveCase;
 
 finalize_it:
 ENDobjQueryInterface(tcpsrv)

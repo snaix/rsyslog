@@ -10,7 +10,7 @@ $MaxMessageSize 10k
 
 $ModLoad ../plugins/imptcp/.libs/imptcp
 $MainMsgQueueTimeoutShutdown 10000
-$InputPTCPServerRun 13514
+$InputPTCPServerRun '$TCPFLOOD_PORT'
 
 $template outfmt,"%msg:F,58:2%,%msg:F,58:3%,%msg:F,58:4%\n"
 template(name="dynfile" type="string" string=`echo $RSYSLOG_OUT_LOG`) # trick to use relative path names!
@@ -25,6 +25,6 @@ tcpflood -c20 -m50000 -r -d100 -P129 -D
 sleep 10 # due to large messages, we need this time for the tcp receiver to settle...
 shutdown_when_empty # shut down rsyslogd when done processing messages
 wait_shutdown_vg    # and wait for it to terminate
-. $srcdir/diag.sh check-exit-vg
+check_exit_vg
 seq_check 0 49999 -E
 exit_test

@@ -10,8 +10,9 @@
 #
 # This file can be customized to environment specifics via environment
 # variables:
-# RS_SORTCMD    Sort command to use (must support -g option). If unset,
+# RS_SORTCMD    Sort command to use (must support $RS_SORT_NUMERIC_OPT option). If unset,
 #		"sort" is used. E.g. Solaris needs "gsort"
+# RS_SORT_NUMERIC_OPT option to use for numerical sort, If unset "-g" is used.
 # RS_CMPCMD     cmp command to use. If unset, "cmd" is used.
 #               E.g. Solaris needs "gcmp"
 # RS_HEADCMD    head command to use. If unset, "head" is used.
@@ -65,47 +66,74 @@ function rsyslog_testbench_test_url_access() {
 
     local http_endpoint="$1"
     if ! curl --fail --max-time 30 "${http_endpoint}" 1>/dev/null 2>&1; then
-        echo "HTTP endpont '${http_endpoint}' isn't reachable. Skipping test ..."
+        echo "HTTP endpoint '${http_endpoint}' is not reachable. Skipping test ..."
         exit 77
     else
         echo "HTTP endpoint '${http_endpoint}' is reachable! Starting test ..."
     fi
 }
 
+# function to skip a test on a specific platform
+# $1 is what we check in uname, $2 (optioal) is a reason message
+function skip_platform() {
+	if [ "$(uname)" == "$1" ]; then
+		echo "uname $(uname)"
+		echo "test does not work under $1"
+		if [ "$2" != "" ]; then
+			echo "reason: $2"
+		fi
+		exit 77
+	fi
+
+}
+
+
 function setvar_RS_HOSTNAME() {
-	rm -f HOSTNAME
-	startup gethostname.conf
+	printf "### Obtaining HOSTNAME (prequisite, not actual test) ###\n"
+	generate_conf
+	add_conf 'module(load="../plugins/imtcp/.libs/imtcp")
+input(type="imtcp" port="'$TCPFLOOD_PORT'")
+
+$template hostname,"%hostname%"
+local0.* ./'${RSYSLOG_DYNNAME}'.HOSTNAME;hostname
+'
+	rm -f "${RSYSLOG_DYNNAME}.HOSTNAME"
+	startup
 	tcpflood -m1 -M "\"<128>\""
 	shutdown_when_empty # shut down rsyslogd when done processing messages
 	wait_shutdown	# we need to wait until rsyslogd is finished!
-	export RS_HOSTNAME="$(cat HOSTNAME)"
+	export RS_HOSTNAME="$(cat ${RSYSLOG_DYNNAME}.HOSTNAME)"
+	rm -f "${RSYSLOG_DYNNAME}.HOSTNAME"
 	echo HOSTNAME is: $RS_HOSTNAME
 }
 
 
 # begin a new testconfig
+#	2018-09-07:	Incremented inputs.timeout.shutdown to 60000 because kafka tests may not be 
+#			finished under stress otherwise
 # $1 is the instance id, if given
 function generate_conf() {
-	new_port="$(get_free_port)"
+	export TCPFLOOD_PORT="$(get_free_port)"
 	if [ "$1" == "" ]; then
-		export IMDIAG_PORT=$new_port
-	else
-		export IMDIAG_PORT2=$new_port
+		export TESTCONF_NM="${RSYSLOG_DYNNAME}_" # this basename is also used by instance 2!
+		export RSYSLOG_OUT_LOG="${RSYSLOG_DYNNAME}.out.log"
+		export RSYSLOG2_OUT_LOG="${RSYSLOG_DYNNAME}_2.out.log"
+		export RSYSLOG_PIDBASE="${RSYSLOG_DYNNAME}:" # also used by instance 2!
+		mkdir $RSYSLOG_DYNNAME.spool
 	fi
-	echo imdiag running on port $new_port
-	echo "module(load=\"../plugins/imdiag/.libs/imdiag\")
-global(inputs.timeout.shutdown=\"10000\")
-\$IMDiagServerRun $new_port
+	echo 'module(load="../plugins/imdiag/.libs/imdiag")
+global(inputs.timeout.shutdown="60000")
+$IMDiagListenPortFileName '$RSYSLOG_DYNNAME.imdiag$1.port'
+$IMDiagServerRun 0
 
-:syslogtag, contains, \"rsyslogd\"  ./rsyslogd$1.started
-###### end of testbench instrumentation part, test conf follows:" > testconf$1.conf
+:syslogtag, contains, "rsyslogd"  ./'${RSYSLOG_DYNNAME}$1'.started
+###### end of testbench instrumentation part, test conf follows:' > ${TESTCONF_NM}$1.conf
 }
-
 
 # add more data to config file. Note: generate_conf must have been called
 # $1 is config fragment, $2 the instance id, if given
 function add_conf() {
-	printf "%s" "$1" >> testconf$2.conf
+	printf "%s" "$1" >> ${TESTCONF_NM}$2.conf
 }
 
 
@@ -138,89 +166,292 @@ function cmp_exact() {
 	fi;
 }
 
-# start rsyslogd with default params. $1 is the config file name to use
-# returns only after successful startup, $2 is the instance (blank or 2!)
-function startup() {
+# code common to all startup...() functions
+function startup_common() {
 	instance=
 	if [ "$1" == "2" ]; then
-	    CONF_FILE="testconf2.conf"
+	    CONF_FILE="${TESTCONF_NM}2.conf"
 	    instance=2
-	elif [ "$1" == "" ]; then
-	    CONF_FILE="testconf.conf"
+	elif [ "$1" == "" -o "$1" == "1" ]; then
+	    CONF_FILE="${TESTCONF_NM}.conf"
 	else
 	    CONF_FILE="$srcdir/testsuites/$1"
 	    instance=$2
 	fi
+	# we need to remove the imdiag port file as there are some
+	# tests that start multiple times. These may get the old port
+	# number if the file still exists AND timing is bad so that
+	# imdiag does not genenrate the port file quickly enough on
+	# startup.
+	rm -f $RSYSLOG_DYNNAME.imdiag$instance.port
 	if [ ! -f $CONF_FILE ]; then
 	    echo "ERROR: config file '$CONF_FILE' not found!"
 	    error_exit 1
 	fi
-	echo $CONF_FILE is:
+	echo config $CONF_FILE is:
 	cat -n $CONF_FILE
-	LD_PRELOAD=$RSYSLOG_PRELOAD $valgrind ../tools/rsyslogd -C -n -irsyslog$instance.pid -M../runtime/.libs:../.libs -f$CONF_FILE &
-	. $srcdir/diag.sh wait-startup $instance
 }
+
+# wait for appearance of a specific pid file, given as $1
+function wait_startup_pid() {
+	if [ "$1" == "" ]; then
+		echo "FAIL: testbench bug: wait_startup_called without \$1"
+		error_exit 100
+	fi
+	i=0
+	while test ! -f $1.pid; do
+		$TESTTOOL_DIR/msleep 100 # wait 100 milliseconds
+		let "i++"
+		if test $i -gt $TB_TIMEOUT_STARTSTOP
+		then
+		   ps -f
+		   echo "ABORT! Timeout waiting on startup (pid file $1.pid)"
+		   error_exit 1
+		fi
+	done
+	echo "$1.pid found, pid  `cat $1.pid`"
+}
+
+# special version of wait_startup_pid() for rsyslog startup
+function wait_rsyslog_startup_pid() {
+	wait_startup_pid $RSYSLOG_PIDBASE$1
+}
+
+# wait for startup of an arbitrary process
+# $1 - pid file name
+# $2 - startup file name (optional, only checked if given)
+function wait_process_startup() {
+	wait_startup_pid $1
+	i=0
+	if [ "$2" != "" ]; then
+		while test ! -f "$2"; do
+			$TESTTOOL_DIR/msleep 100 # wait 100 milliseconds
+			ps -p `cat $1.pid` &> /dev/null
+			if [ $? -ne 0 ]
+			then
+			   echo "ABORT! pid in $1 no longer active during startup!"
+			   error_exit 1
+			fi
+			let "i++"
+			if test $i -gt $TB_TIMEOUT_STARTSTOP
+			then
+			   echo "ABORT! Timeout waiting on file '$2'"
+			   error_exit 1
+			fi
+		done
+		echo "$2 seen, associated pid " `cat $1.pid`
+	fi
+}
+
+# wait for file $1 to exist AND be non-empty
+function wait_file_exists() {
+	i=0
+	while true; do
+		if [ -f $1 -a "$(cat $1)" != "" ]; then
+			break
+		fi
+		$TESTTOOL_DIR/msleep 100 # wait 100 milliseconds
+		let "i++"
+		if test $i -gt $TB_TIMEOUT_STARTSTOP; then
+		   echo "ABORT! Timeout waiting for file $1"
+		   ls -l $1
+		   error_exit 1
+		fi
+	done
+}
+
+# wait for rsyslogd startup ($1 is the instance)
+function wait_startup() {
+	wait_rsyslog_startup_pid $1
+	i=0
+	while test ! -f ${RSYSLOG_DYNNAME}$1.started; do
+		$TESTTOOL_DIR/msleep 100 # wait 100 milliseconds
+		ps -p `cat $RSYSLOG_PIDBASE$1.pid` &> /dev/null
+		if [ $? -ne 0 ]
+		then
+		   echo "ABORT! rsyslog pid no longer active during startup!"
+		   error_exit 1 stacktrace
+		fi
+		let "i++"
+		if test $i -gt $TB_TIMEOUT_STARTSTOP
+		then
+		   echo "ABORT! Timeout waiting on startup ('${RSYSLOG_DYNNAME}.started' file)"
+		   error_exit 1
+		fi
+	done
+	echo "rsyslogd$1 startup msg seen, pid " `cat $RSYSLOG_PIDBASE$1.pid`
+	wait_file_exists $RSYSLOG_DYNNAME.imdiag$1.port
+	eval export IMDIAG_PORT$1=$(cat $RSYSLOG_DYNNAME.imdiag$1.port)
+	eval PORT=$IMDIAG_PORT$1
+	echo "imdiag$1 port: $PORT"
+	if [ "$PORT" == "" ]; then
+		echo "TESTBENCH ERROR: imdiag port not found!"
+		ls -l $RSYSLOG_DYNNAME*
+		exit 100
+	fi
+}
+
 
 # start rsyslogd with default params. $1 is the config file name to use
 # returns only after successful startup, $2 is the instance (blank or 2!)
-function startup_silent() {
-	if [ ! -f $srcdir/testsuites/$1 ]; then
-	    echo "ERROR: config file '$srcdir/testsuites/$1' not found!"
-	    exit 1
-	fi
-	$valgrind ../tools/rsyslogd -C -n -irsyslog$2.pid -M../runtime/.libs:../.libs -f$srcdir/testsuites/$1 2>/dev/null &
-	. $srcdir/diag.sh wait-startup $2
+# RS_REDIR maybe set to redirect rsyslog output
+function startup() {
+	startup_common "$1" "$2"
+	eval LD_PRELOAD=$RSYSLOG_PRELOAD $valgrind ../tools/rsyslogd -C -n -i$RSYSLOG_PIDBASE$instance.pid -M../runtime/.libs:../.libs -f$CONF_FILE $RS_REDIR &
+	wait_startup $instance
 }
+
 
 # same as startup_vg, BUT we do NOT wait on the startup message!
 function startup_vg_waitpid_only() {
+	startup_common "$1" "$2"
 	if [ "x$RS_TESTBENCH_LEAK_CHECK" == "x" ]; then
 	    RS_TESTBENCH_LEAK_CHECK=full
 	fi
-	if [ "x$1" == "x" ]; then
-	    CONF_FILE="testconf.conf"
-	    echo $CONF_FILE is:
-	    cat -n $CONF_FILE
-	else
-	    CONF_FILE="$srcdir/testsuites/$1"
-	fi
-	if [ ! -f $CONF_FILE ]; then
-	    echo "ERROR: config file '$CONF_FILE' not found!"
-	    exit 1
-	fi
-	LD_PRELOAD=$RSYSLOG_PRELOAD valgrind $RS_TEST_VALGRIND_EXTRA_OPTS $RS_TESTBENCH_VALGRIND_EXTRA_OPTS --suppressions=$srcdir/known_issues.supp --gen-suppressions=all --log-fd=1 --error-exitcode=10 --malloc-fill=ff --free-fill=fe --leak-check=$RS_TESTBENCH_LEAK_CHECK ../tools/rsyslogd -C -n -irsyslog$2.pid -M../runtime/.libs:../.libs -f$CONF_FILE &
-	. $srcdir/diag.sh wait-startup-pid $2
+	LD_PRELOAD=$RSYSLOG_PRELOAD valgrind $RS_TEST_VALGRIND_EXTRA_OPTS $RS_TESTBENCH_VALGRIND_EXTRA_OPTS --suppressions=$srcdir/known_issues.supp --gen-suppressions=all --log-fd=1 --error-exitcode=10 --malloc-fill=ff --free-fill=fe --leak-check=$RS_TESTBENCH_LEAK_CHECK ../tools/rsyslogd -C -n -i$RSYSLOG_PIDBASE$2.pid -M../runtime/.libs:../.libs -f$CONF_FILE &
+	wait_rsyslog_startup_pid $1
 }
 
+# start rsyslogd with default params under valgrind control. $1 is the config file name to use
+# returns only after successful startup, $2 is the instance (blank or 2!)
 function startup_vg() {
-. $srcdir/diag.sh startup_vg $*
+		startup_vg_waitpid_only $1 $2
+		wait_startup $2
+		echo startup_vg still running
 }
 
+# same as startup-vg, except that --leak-check is set to "none". This
+# is meant to be used in cases where we have to deal with libraries (and such
+# that) we don't can influence and where we cannot provide suppressions as
+# they are platform-dependent. In that case, we can't test for leak checks
+# (obviously), but we can check for access violations, what still is useful.
 function startup_vg_noleak() {
-. $srcdir/diag.sh startup_vg_noleak $*
+	RS_TESTBENCH_LEAK_CHECK=no
+	startup_vg $*
 }
 
+# same as startup-vgthread, BUT we do NOT wait on the startup message!
 function startup_vgthread_waitpid_only() {
-. $srcdir/diag.sh startup_vgthread_waitpid_only $*
+	startup_common "$1" "$2"
+	valgrind --tool=helgrind $RS_TEST_VALGRIND_EXTRA_OPTS $RS_TESTBENCH_VALGRIND_EXTRA_OPTS --log-fd=1 --error-exitcode=10 --suppressions=$srcdir/linux_localtime_r.supp --gen-suppressions=all ../tools/rsyslogd -C -n -i$RSYSLOG_PIDBASE$2.pid -M../runtime/.libs:../.libs -f$CONF_FILE &
+	wait_rsyslog_startup_pid $2
 }
 
+# start rsyslogd with default params under valgrind thread debugger control.
+# $1 is the config file name to use, $2 is the instance (blank or 2!)
+# returns only after successful startup
 function startup_vgthread() {
-. $srcdir/diag.sh startup_vgthread $*
+	startup_vgthread_waitpid_only $1 $2
+	wait_startup $2
+}
+
+
+# inject messages via our inject interface (imdiag)
+function injectmsg() {
+	echo injecting $2 messages
+	echo injectmsg $1 $2 $3 $4 | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT || error_exit  $?
+}
+
+# inject messages in INSTANCE 2 via our inject interface (imdiag)
+function injectmsg2() {
+	echo injecting $2 messages
+	echo injectmsg $1 $2 $3 $4 | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT2 || error_exit  $?
+	# TODO: some return state checking? (does it really make sense here?)
+}
+
+
+# show the current main queue size. $1 is the instance.
+function get_mainqueuesize() {
+	if [ "$1" == "2" ]; then
+		echo getmainmsgqueuesize | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT2 || error_exit  $?
+	else
+		echo getmainmsgqueuesize | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT || error_exit  $?
+	fi
+}
+
+# grep for (partial) content. $1 is the content to check for
+function content_check() {
+	cat ${RSYSLOG_OUT_LOG} | grep -qF "$1"
+	if [ "$?" -ne "0" ]; then
+	    printf "\n============================================================\n"
+	    echo FAIL: content_check failed to find "'$1'", content is
+	    cat -n ${RSYSLOG_OUT_LOG}
+	    error_exit 1
+	fi
+}
+
+
+function content_check_with_count() {
+	# content check variables for Timeout
+	if [ "x$3" == "x" ]; then
+		timeoutend=1
+	else
+		timeoutend=$3
+	fi
+	timecounter=0
+
+	while [  $timecounter -lt $timeoutend ]; do
+		let timecounter=timecounter+1
+
+		count=$(cat ${RSYSLOG_OUT_LOG} | grep -F "$1" | wc -l)
+
+		if [ $count -eq $2 ]; then
+			echo content_check_with_count success, \"$1\" occured $2 times
+			break
+		else
+			if [ "x$timecounter" == "x$timeoutend" ]; then
+				shutdown_when_empty
+				wait_shutdown
+
+				echo content_check_with_count failed, expected \"$1\" to occur $2 times, but found it $count times
+				echo file ${RSYSLOG_OUT_LOG} content is:
+				sort < ${RSYSLOG_OUT_LOG}
+				error_exit 1
+			else
+				echo content_check_with_count have $count, wait for $2 times $1...
+				$TESTTOOL_DIR/msleep 1000
+			fi
+		fi
+	done
+}
+
+
+function custom_content_check() {
+	cat $2 | grep -qF "$1"
+	if [ "$?" -ne "0" ]; then
+	    echo FAIL: custom_content_check failed to find "'$1'" inside "'$2'"
+	    echo "file contents:"
+	    cat -n $2
+	    error_exit 1
+	fi
+}
+
+
+# wait for main message queue to be empty. $1 is the instance.
+function wait_queueempty() {
+	if [ "$1" == "2" ]; then
+		echo WaitMainQueueEmpty | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT2 || error_exit  $?
+	else
+		echo WaitMainQueueEmpty | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT || error_exit  $?
+	fi
 }
 
 
 # shut rsyslogd down when main queue is empty. $1 is the instance.
 function shutdown_when_empty() {
-	if [ "$1" == "2" ]
-	then
+	if [ "$1" == "2" ]; then
 	   echo Shutting down instance 2
 	else
 	   echo Shutting down instance 1
 	fi
-	. $srcdir/diag.sh wait-queueempty $1
-	cp rsyslog$1.pid rsyslog$1.pid.save
+	wait_queueempty $1
+	if [ "$RSYSLOG_PIDBASE" == "" ]; then
+		echo "RSYSLOG_PIDBASE is EMPTY! - bug in test? (instance $1)"
+		exit 1
+	fi
+	cp $RSYSLOG_PIDBASE$1.pid $RSYSLOG_PIDBASE$1.pid.save
 	$TESTTOOL_DIR/msleep 500 # wait a bit (think about slow testbench machines!)
-	kill `cat rsyslog$1.pid` # note: we do not wait for the actual termination!
+	kill `cat $RSYSLOG_PIDBASE$1.pid` # note: we do not wait for the actual termination!
 }
 
 
@@ -228,7 +459,8 @@ function shutdown_when_empty() {
 # $1 is the instance
 function wait_shutdown() {
 	i=0
-	out_pid=`cat rsyslog$1.pid.save`
+	out_pid=`cat $RSYSLOG_PIDBASE$1.pid.save`
+	echo wait on shutdown of $out_pid
 	if [[ "x$out_pid" == "x" ]]
 	then
 		terminated=1
@@ -261,15 +493,59 @@ function wait_shutdown() {
 }
 
 
+# wait for all pending lookup table reloads to complete $1 is the instance.
+function await_lookup_table_reload() {
+	if [ "$1" == "2" ]; then
+		echo AwaitLookupTableReload | $TESTTOOL_DIR/diagtalker -pIMDIAG_PORT2 || error_exit  $?
+	else
+		echo AwaitLookupTableReload | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT || error_exit  $?
+	fi
+}
+
+
+function assert_content_missing() {
+	cat ${RSYSLOG_OUT_LOG} | grep -qF "$1"
+	if [ "$?" -eq "0" ]; then
+		echo content-missing assertion failed, some line matched pattern "'$1'"
+		error_exit 1
+	fi
+}
+
+
+function custom_assert_content_missing() {
+	cat $2 | grep -qF "$1"
+	if [ "$?" -eq "0" ]; then
+		echo content-missing assertion failed, some line in "'$2'" matched pattern "'$1'"
+		cat -n "$2"
+		error_exit 1
+	fi
+}
+
+
+# shut rsyslogd down when main queue is empty. $1 is the instance.
+function issue_HUP() {
+	kill -HUP `cat $RSYSLOG_PIDBASE$1.pid`
+	$TESTTOOL_DIR/msleep 1000
+}
+
+
 # actually, we wait for rsyslog.pid to be deleted. $1 is the instance
 function wait_shutdown_vg() {
-	wait `cat rsyslog$1.pid`
+	wait `cat $RSYSLOG_PIDBASE$1.pid`
 	export RSYSLOGD_EXIT=$?
 	echo rsyslogd run exited with $RSYSLOGD_EXIT
-	if [ -e vgcore.* ]
-	then
+	if [ -e vgcore.* ]; then
 	   echo "ABORT! core file exists"
 	   error_exit 1
+	fi
+}
+
+
+# check exit code for valgrind error
+function check_exit_vg(){
+	if [ "$RSYSLOGD_EXIT" -eq "10" ]; then
+		echo "valgrind run FAILED with exceptions - terminating"
+		error_exit 1
 	fi
 }
 
@@ -278,7 +554,7 @@ function wait_shutdown_vg() {
 # for systems like Travis-CI where we cannot debug on the machine itself.
 # our $1 is the to-be-used exit code. if $2 is "stacktrace", call gdb.
 function error_exit() {
-	env
+	#env
 	if [ -e core* ]
 	then
 		echo trying to obtain crash location info
@@ -332,9 +608,14 @@ function error_exit() {
 		# Dump Kafka log
 		. $srcdir/diag.sh dump-kafka-serverlog
 	fi
+	# output listening ports as a temporay debug measure (2018-09-08 rgerhards)
+	if [ $(uname) == "Linux" ]; then
+		netstat -tlp
+	else
+		netstat
+	fi
 	# we need to do some minimal cleanup so that "make distcheck" does not
 	# complain too much
-	rm -f diag-common.conf diag-common2.conf
 	exit $1
 }
 
@@ -343,9 +624,12 @@ function error_exit() {
 # $4... are just to have the abilit to pass in more options...
 # add -v to chkseq if you need more verbose output
 function seq_check() {
-	$RS_SORTCMD -g < ${RSYSLOG_OUT_LOG} | ./chkseq -s$1 -e$2 $3 $4 $5 $6 $7
+	$RS_SORTCMD $RS_SORT_NUMERIC_OPT < ${RSYSLOG_OUT_LOG} | ./chkseq -s$1 -e$2 $3 $4 $5 $6 $7
 	if [ "$?" -ne "0" ]; then
-		echo "sequence error detected"
+		echo "sequence error detected in $RSYSLOG_OUT_LOG"
+		echo "number of lines in file: $(wc -l $RSYSLOG_OUT_LOG)"
+		echo "sorted data has been placed in error.log"
+		$RS_SORTCMD $RS_SORT_NUMERIC_OPT < ${RSYSLOG_OUT_LOG} > error.log
 		error_exit 1 
 	fi
 }
@@ -357,7 +641,7 @@ function seq_check() {
 # $4... are just to have the abilit to pass in more options...
 # add -v to chkseq if you need more verbose output
 function seq_check2() {
-	$RS_SORTCMD -g < ${RSYSLOG2_OUT_LOG}  | ./chkseq -s$1 -e$2 $3 $4 $5 $6 $7
+	$RS_SORTCMD $RS_SORT_NUMERIC_OPT < ${RSYSLOG2_OUT_LOG}  | ./chkseq -s$1 -e$2 $3 $4 $5 $6 $7
 	if [ "$?" -ne "0" ]; then
 		echo "sequence error detected"
 		error_exit 1
@@ -369,7 +653,7 @@ function seq_check2() {
 # $4... are just to have the abilit to pass in more options...
 function gzip_seq_check() {
 	ls -l ${RSYSLOG_OUT_LOG}
-	gunzip < ${RSYSLOG_OUT_LOG} | $RS_SORTCMD -g | ./chkseq -v -s$1 -e$2 $3 $4 $5 $6 $7
+	gunzip < ${RSYSLOG_OUT_LOG} | $RS_SORTCMD $RS_SORT_NUMERIC_OPT | ./chkseq -v -s$1 -e$2 $3 $4 $5 $6 $7
 	if [ "$?" -ne "0" ]; then
 		echo "sequence error detected"
 		error_exit 1
@@ -381,7 +665,7 @@ function gzip_seq_check() {
 function tcpflood() {
 	eval ./tcpflood -p$TCPFLOOD_PORT "$@" $TCPFLOOD_EXTRA_OPTS
 	if [ "$?" -ne "0" ]; then
-		echo "error during tcpflood! see ${RSYSLOG_OUT_LOG}.save for what was written"
+		echo "error during tcpflood on port ${TCPFLOOD_PORT}! see ${RSYSLOG_OUT_LOG}.save for what was written"
 		cp ${RSYSLOG_OUT_LOG} ${RSYSLOG_OUT_LOG}.save
 		error_exit 1 stacktrace
 	fi
@@ -392,35 +676,33 @@ function tcpflood() {
 # detect any left-over hanging instance
 function exit_test() {
 	nhanging=0
-	for pid in $(ps -eo pid,args|grep '/tools/[r]syslogd ' |sed -e 's/\( *\)\([0-9]*\).*/\2/');
-	do
-		echo "ERROR: left-over instance $pid, killing it"
-		ps -fp $pid
-		pwd
-		printf "we do NOT kill the instance as this does not work with multiple\n"
-		printf "builds per machine - this message is now informational to show prob exists!\n"
-		#kill -9 $pid
-		let "nhanging++"
-	done
+	#for pid in $(ps -eo pid,args|grep '/tools/[r]syslogd ' |sed -e 's/\( *\)\([0-9]*\).*/\2/');
+	#do
+		#echo "ERROR: left-over instance $pid, killing it"
+	#	ps -fp $pid
+	#	pwd
+	#	printf "we do NOT kill the instance as this does not work with multiple\n"
+	#	printf "builds per machine - this message is now informational to show prob exists!\n"
+	#	#kill -9 $pid
+	#	let "nhanging++"
+	#done
 	if test $nhanging -ne 0
 	then
 	   echo "ABORT! hanging instances left at exit"
 	   #error_exit 1
-	   exit 77 # for now, just skip - TODO: reconsider when supporting -j
+	   #exit 77 # for now, just skip - TODO: reconsider when supporting -j
 	fi
 	# now real cleanup
-	rm -f rsyslogd.started work-*.conf diag-common.conf
-	rm -f rsyslogd2.started diag-common2.conf rsyslog.action.*.include
-	rm -f work rsyslog.out.* ${RSYSLOG2_OUT_LOG} rsyslog*.pid.save xlate*.lkp_tbl
-	rm -rf test-spool test-logdir stat-file1
-	rm -f rsyslog.random.data rsyslog.pipe
-	rm -f -r rsyslog.input.*
-	rm -f rsyslog.input rsyslog.conf.tlscert stat-file1 rsyslog.empty rsyslog.input.* imfile-state*
-	rm -rf rsyslog.input-symlink.log rsyslog-link.*.log targets
-	rm -f testconf.conf
-	rm -f rsyslog.errorfile tmp.qi nocert
-	rm -f HOSTNAME imfile-state:.-rsyslog.input
+	rm -f rsyslog.action.*.include
+	rm -f work rsyslog.out.* xlate*.lkp_tbl
+	rm -rf test-logdir stat-file1
+	rm -f rsyslog.conf.tlscert stat-file1 rsyslog.empty imfile-state*
+	rm -rf rsyslog-link.*.log targets
+	rm -f ${TESTCONF_NM}.conf
+	rm -f tmp.qi nocert
+	rm -fr $RSYSLOG_DYNNAME*  # delete all of our dynamic files
 	unset TCPFLOOD_EXTRA_OPTS
+	printf "Test SUCCESFUL\n"
 	echo  -------------------------------------------------------------------------------
 }
 
@@ -433,25 +715,53 @@ function get_free_port() {
 python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'
 }
 
+# check if command $1 is available - will exit 77 when not OK
+function check_command_available() {
+	command -v $1
+	if [ $? -ne 0 ] ; then
+		echo Testbench requires unavailable command: $1
+		exit 77
+	fi
+}
+
+
+# sort the output file just like we normally do it, but do not call
+# seqchk. This is needed for some operations where we need the sort
+# result for some preprocessing. Note that a later seqchk will sort
+# again, but that's not an issue.
+function presort() {
+	rm -f $RSYSLOG_DYNNAME.presort
+	$RS_SORTCMD $RS_SORT_NUMERIC_OPT < ${RSYSLOG_OUT_LOG} > $RSYSLOG_DYNNAME.presort
+}
+
+
 #START: ext kafka config
-dep_cache_dir=$(readlink -f .dep_cache)
-dep_zk_url=http://www-us.apache.org/dist/zookeeper/zookeeper-3.4.10/zookeeper-3.4.10.tar.gz
-dep_zk_cached_file=$dep_cache_dir/zookeeper-3.4.10.tar.gz
-dep_kafka_url=http://www-us.apache.org/dist/kafka/0.10.2.1/kafka_2.12-0.10.2.1.tgz
+#dep_cache_dir=$(readlink -f .dep_cache)
+dep_cache_dir=$(pwd)/.dep_cache
+dep_zk_url=http://www-us.apache.org/dist/zookeeper/zookeeper-3.4.13/zookeeper-3.4.13.tar.gz
+dep_zk_cached_file=$dep_cache_dir/zookeeper-3.4.13.tar.gz
+
+# byANDRE: We stay with kafka 0.10.x for now. Newer Kafka Versions have changes that
+#	makes creating testbench with single kafka instances difficult.
+# old version -> dep_kafka_url=http://www-us.apache.org/dist/kafka/0.10.2.2/kafka_2.12-0.10.2.2.tgz
+# old version -> dep_kafka_cached_file=$dep_cache_dir/kafka_2.12-0.10.2.2.tgz
+dep_kafka_url=http://www-us.apache.org/dist/kafka/2.0.0/kafka_2.12-2.0.0.tgz
+dep_kafka_cached_file=$dep_cache_dir/kafka_2.12-2.0.0.tgz
+
 if [ -z "$ES_DOWNLOAD" ]; then
 	export ES_DOWNLOAD=elasticsearch-5.6.9.tar.gz
 fi
 dep_es_cached_file="$dep_cache_dir/$ES_DOWNLOAD"
 
 # kafaka (including Zookeeper)
-dep_kafka_cached_file=$dep_cache_dir/kafka_2.12-0.10.2.1.tgz
 dep_kafka_dir_xform_pattern='s#^[^/]\+#kafka#g'
 dep_zk_dir_xform_pattern='s#^[^/]\+#zk#g'
 dep_es_dir_xform_pattern='s#^[^/]\+#es#g'
-dep_kafka_log_dump=$(readlink -f rsyslog.out.kafka.log)
+#dep_kafka_log_dump=$(readlink -f rsyslog.out.kafka.log)
 
 #	TODO Make dynamic work dir for multiple instances
-dep_work_dir=$(readlink -f .dep_wrk)
+#dep_work_dir=$(readlink -f .dep_wrk)
+dep_work_dir=$(pwd)/.dep_wrk
 #dep_kafka_work_dir=$dep_work_dir/kafka
 #dep_zk_work_dir=$dep_work_dir/zk
 
@@ -470,13 +780,13 @@ case $1 in
 
 		# cleanup of hanging instances from previous runs
 		# practice has shown this is pretty useful!
-		for pid in $(ps -eo pid,args|grep '/tools/[r]syslogd ' |sed -e 's/\( *\)\([0-9]*\).*/\2/');
-		do
-			echo "ERROR: left-over previous instance $pid, killing it"
-			ps -fp $pid
-			pwd
-			kill -9 $pid
-		done
+		#for pid in $(ps -eo pid,args|grep '/tools/[r]syslogd ' |sed -e 's/\( *\)\([0-9]*\).*/\2/');
+		#do
+			#echo "ERROR: left-over previous instance $pid, killing it"
+			#ps -fp $pid
+			#pwd
+			#kill -9 $pid
+		#done
 		# cleanup hanging uxsockrcvr processes
 		for pid in $(ps -eo pid,args|grep 'uxsockrcvr' |grep -v grep |sed -e 's/\( *\)\([0-9]*\).*/\2/');
 		do
@@ -487,9 +797,36 @@ case $1 in
 		done
 		# end cleanup
 
+		# some default names (later to be set in other parts, once we support fully
+		# parallel tests)
+		export RSYSLOG_DFLT_LOG_INTERNAL=1 # testbench needs internal messages logged internally!
+		if [ "$SYSLOG_DYNNAME" != "" ]; then
+			echo "FAIL: \$RSYSLOG_DYNNAME already set in init"
+			echo "hint: was init accidently called twice?"
+			exit 2
+		fi
+		export RSYSLOG_DYNNAME="rstb_$(./test_id $(basename $0))"
+		export RSYSLOG2_OUT_LOG=rsyslog2.out.log # TODO: remove
+		export RSYSLOG_OUT_LOG=rsyslog.out.log # TODO: remove
+		export RSYSLOG_PIDBASE="rsyslog" # TODO: remove
+		export IMDIAG_PORT=13500
+		export IMDIAG_PORT2=13501
+		export TCPFLOOD_PORT=13514
+
+		# we create one file with the test name, so that we know what was
+		# left over if "make distcheck" complains
+		touch $RSYSLOG_DYNNAME-$(basename $0).test_id
+
 		if [ -z $RS_SORTCMD ]; then
 			RS_SORTCMD=sort
-		fi  
+		fi
+		if [ -z $RS_SORT_NUMERIC_OPT ]; then
+			if [ "$(uname)" == "AIX" ]; then
+				RS_SORT_NUMERIC_OPT=-n
+			else
+				RS_SORT_NUMERIC_OPT=-g
+			fi
+		fi
 		if [ -z $RS_CMPCMD ]; then
 			RS_CMPCMD=cmp
 		fi
@@ -506,24 +843,18 @@ case $1 in
 			echo "testbench: TZ env var not set, setting it to UTC"
 			export TZ=UTC
 		fi
-		cp -f $srcdir/testsuites/diag-common.conf diag-common.conf
-		cp -f $srcdir/testsuites/diag-common2.conf diag-common2.conf
-		rm -f rsyslogd.started work-*.conf rsyslog.random.data
-		rm -f rsyslogd2.started work-*.conf rsyslog*.pid.save xlate*.lkp_tbl
+		rm -f xlate*.lkp_tbl
 		rm -f log log* # RSyslog debug output 
-		rm -f work rsyslog.out.* ${RSYSLOG2_OUT_LOG} # common work files
-		rm -rf test-spool test-logdir stat-file1
-		rm -f rsyslog.pipe rsyslog.input.*
-		rm -f rsyslog.input rsyslog.empty rsyslog.input.* imfile-state* omkafka-failed.data
-		rm -rf rsyslog.input-symlink.log rsyslog-link.*.log targets
-		rm -f testconf*.conf HOSTNAME
-		rm -f rsyslog.errorfile tmp.qi nocert
+		rm -f work 
+		rm -rf test-logdir stat-file1
+		rm -f rsyslog.empty imfile-state* omkafka-failed.data
+		rm -rf rsyslog-link.*.log targets
+		rm -f tmp.qi nocert
 		rm -f core.* vgcore.* core*
 		# Note: rsyslog.action.*.include must NOT be deleted, as it
 		# is used to setup some parameters BEFORE calling init. This
 		# happens in chained test scripts. Delete on exit is fine,
 		# though.
-		mkdir test-spool
 		# note: TCPFLOOD_EXTRA_OPTS MUST NOT be unset in init, because
 		# some tests need to set it BEFORE calling init to accomodate
 		# their generic test drivers.
@@ -536,21 +867,8 @@ case $1 in
 		if [ -e IN_AUTO_DEBUG ]; then
 			export valgrind="valgrind --malloc-fill=ff --free-fill=fe --suppressions=$srcdir/known_issues.supp --log-fd=1"
 		fi
-		export RSYSLOG_DFLT_LOG_INTERNAL=1 # testbench needs internal messages logged internally!
-		export RSYSLOG2_OUT_LOG=rsyslog2.out.log
-		export RSYSLOG_OUT_LOG=rsyslog.out.log
-		export IMDIAG_PORT=13500
-		export IMDIAG_PORT2=13501
-		export TCPFLOOD_PORT=13514
 		;;
 
-   'check-command-available')   # check if command $2 is available - will exit 77 when not OK
-		command -v $2
-		if [ $? -ne 0 ] ; then
-			echo Testbench requires unavailable command: $2
-			exit 77
-		fi
-		;;
    'check-ipv6-available')   # check if IPv6  - will exit 77 when not OK
 		ifconfig -a |grep ::1
 		if [ $? -ne 0 ] ; then
@@ -576,79 +894,7 @@ case $1 in
 		python $srcdir/es_response_get_msgnum.py > ${RSYSLOG_OUT_LOG}
 		;;
    'getpid')
-		pid=$(cat rsyslog$2.pid)
-		;;
-   'startup_vg') # start rsyslogd with default params under valgrind control. $2 is the config file name to use
-		# returns only after successful startup, $3 is the instance (blank or 2!)
-		startup_vg_waitpid_only $2 $3
-		. $srcdir/diag.sh wait-startup $3
-		echo startup_vg still running
-		;;
-   'startup_vg_noleak') # same as startup-vg, except that --leak-check is set to "none". This
-   		# is meant to be used in cases where we have to deal with libraries (and such
-		# that) we don't can influence and where we cannot provide suppressions as
-		# they are platform-dependent. In that case, we can't test for leak checks
-		# (obviously), but we can check for access violations, what still is useful.
-		RS_TESTBENCH_LEAK_CHECK=no
-		startup_vg_waitpid_only $2 $3
-		. $srcdir/diag.sh wait-startup $3
-		echo startup_vg still running
-		;;
-
-   'startup_vgthread_waitpid_only') # same as startup-vgthread, BUT we do NOT wait on the startup message!
-		if [ "x$2" == "x" ]; then
-		    CONF_FILE="testconf.conf"
-		    echo $CONF_FILE is:
-		    cat -n $CONF_FILE
-		else
-		    CONF_FILE="$srcdir/testsuites/$2"
-		fi
-		if [ ! -f $CONF_FILE ]; then
-		    echo "ERROR: config file '$CONF_FILE' not found!"
-		    exit 1
-		fi
-		valgrind --tool=helgrind $RS_TEST_VALGRIND_EXTRA_OPTS $RS_TESTBENCH_VALGRIND_EXTRA_OPTS --log-fd=1 --error-exitcode=10 --suppressions=$srcdir/linux_localtime_r.supp --gen-suppressions=all ../tools/rsyslogd -C -n -irsyslog$3.pid -M../runtime/.libs:../.libs -f$CONF_FILE &
-		. $srcdir/diag.sh wait-startup-pid $3
-		;;
-   'startup_vgthread') # start rsyslogd with default params under valgrind thread debugger control.
-   		# $2 is the config file name to use
-		# returns only after successful startup, $3 is the instance (blank or 2!)
-		startup_vgthread_waitpid_only $2 $3
-		. $srcdir/diag.sh wait-startup $3
-		;;
-   'wait-startup-pid') # wait for rsyslogd startup, PID only ($2 is the instance)
-		i=0
-		while test ! -f rsyslog$2.pid; do
-			$TESTTOOL_DIR/msleep 100 # wait 100 milliseconds
-			let "i++"
-			if test $i -gt $TB_TIMEOUT_STARTSTOP
-			then
-			   ps -f
-			   echo "ABORT! Timeout waiting on startup (pid file rsyslog$2.pid)"
-			   error_exit 1
-			fi
-		done
-		echo "rsyslogd$2 started, start msg not yet seen, pid " `cat rsyslog$2.pid`
-		;;
-   'wait-startup') # wait for rsyslogd startup ($2 is the instance)
-		. $srcdir/diag.sh wait-startup-pid $2
-		i=0
-		while test ! -f rsyslogd$2.started; do
-			$TESTTOOL_DIR/msleep 100 # wait 100 milliseconds
-			ps -p `cat rsyslog$2.pid` &> /dev/null
-			if [ $? -ne 0 ]
-			then
-			   echo "ABORT! rsyslog pid no longer active during startup!"
-			   error_exit 1 stacktrace
-			fi
-			let "i++"
-			if test $i -gt $TB_TIMEOUT_STARTSTOP
-			then
-			   echo "ABORT! Timeout waiting on startup ('started' file)"
-			   error_exit 1
-			fi
-		done
-		echo "rsyslogd$2 startup msg seen, pid " `cat rsyslog$2.pid`
+		pid=$(cat $RSYSLOG_PIDBASE$2.pid)
 		;;
    'wait-pid-termination')  # wait for the pid in pid $2 to terminate, abort on timeout
 		i=0
@@ -679,54 +925,14 @@ case $1 in
 		unset terminated
 		unset out_pid
 		;;
-   'check-exit-vg') # wait for main message queue to be empty. $2 is the instance.
-		if [ "$RSYSLOGD_EXIT" -eq "10" ]
-		then
-			echo "valgrind run FAILED with exceptions - terminating"
-			exit 1
-		fi
-		;;
-   'get-mainqueuesize') # show the current main queue size
-		if [ "$2" == "2" ]
-		then
-			echo getmainmsgqueuesize | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT2 || error_exit  $?
-		else
-			echo getmainmsgqueuesize | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT || error_exit  $?
-		fi
-		;;
-   'wait-queueempty') # wait for main message queue to be empty. $2 is the instance.
-		if [ "$2" == "2" ]
-		then
-			echo WaitMainQueueEmpty | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT2 || error_exit  $?
-		else
-			echo WaitMainQueueEmpty | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT || error_exit  $?
-		fi
-		;;
-   'await-lookup-table-reload') # wait for all pending lookup table reloads to complete $2 is the instance.
-		if [ "$2" == "2" ]
-		then
-			echo AwaitLookupTableReload | $TESTTOOL_DIR/diagtalker -pIMDIAG_PORT2 || error_exit  $?
-		else
-			echo AwaitLookupTableReload | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT || error_exit  $?
-		fi
-		;;
-   'issue-HUP') # shut rsyslogd down when main queue is empty. $2 is the instance.
-		kill -HUP `cat rsyslog$2.pid`
-		$TESTTOOL_DIR/msleep 1000
-		;;
    'shutdown-immediate') # shut rsyslogd down without emptying the queue. $2 is the instance.
-		cp rsyslog$2.pid rsyslog$2.pid.save
-		kill `cat rsyslog$2.pid`
+		cp $RSYSLOG_PIDBASE$2.pid $RSYSLOG_PIDBASE$2.pid.save
+		kill `cat $RSYSLOG_PIDBASE$2.pid`
 		# note: we do not wait for the actual termination!
 		;;
    'kill-immediate') # kill rsyslog unconditionally
-		kill -9 `cat rsyslog.pid`
+		kill -9 `cat $RSYSLOG_PIDBASE.pid`
 		# note: we do not wait for the actual termination!
-		;;
-   'injectmsg') # inject messages via our inject interface (imdiag)
-		echo injecting $3 messages
-		echo injectmsg $2 $3 $4 $5 | $TESTTOOL_DIR/diagtalker -p$IMDIAG_PORT || error_exit  $?
-		# TODO: some return state checking? (does it really make sense here?)
 		;;
     'injectmsg-litteral') # inject litteral-payload  via our inject interface (imdiag)
 		echo injecting msg payload from: $2
@@ -735,20 +941,13 @@ case $1 in
 		;;
    'check-mainq-spool') # check if mainqueue spool files exist, if not abort (we just check .qi).
 		echo There must exist some files now:
-		ls -l test-spool
+		ls -l $RSYSLOG_DYNNAME.spool
 		echo .qi file:
-		cat test-spool/mainq.qi
-		if test ! -f test-spool/mainq.qi; then
+		cat $RSYSLOG_DYNNAME.spool/mainq.qi
+		if test ! -f $RSYSLOG_DYNNAME.spool/mainq.qi; then
 		  echo "error: mainq.qi does not exist where expected to do so!"
 		  error_exit 1
 		fi
-		;;
-   'presort')	# sort the output file just like we normally do it, but do not call
-		# seqchk. This is needed for some operations where we need the sort
-		# result for some preprocessing. Note that a later seqchk will sort
-		# again, but that's not an issue.
-		rm -f work
-		$RS_SORTCMD -g < ${RSYSLOG_OUT_LOG} > work
 		;;
    'assert-equal')
 		if [ "x$4" == "x" ]; then
@@ -780,26 +979,6 @@ case $1 in
 		error_exit 1
 		fi;
 		;;
-   'content-cmp')
-		echo "$2" | cmp - ${RSYSLOG_OUT_LOG}
-		if [ "$?" -ne "0" ]; then
-		    echo FAIL: content-cmp failed
-		    echo EXPECTED:
-		    echo $2
-		    echo ACTUAL:
-		    cat ${RSYSLOG_OUT_LOG}
-		    error_exit 1
-		fi
-		;;
-   'content-check')
-		cat ${RSYSLOG_OUT_LOG} | grep -qF "$2"
-		if [ "$?" -ne "0" ]; then
-		    printf "\n============================================================\n"
-		    echo FAIL: content-check failed to find "'$2'", content is
-		    cat ${RSYSLOG_OUT_LOG}
-		    error_exit 1
-		fi
-		;;
    'wait-file-lines') 
 		# $2 filename, $3 expected nbr of lines, $4 nbr of tries
 		if [ "$4" == "" ]; then
@@ -829,39 +1008,6 @@ case $1 in
 			fi
 		done
 		unset count
-		;;
-   'content-check-with-count') 
-		# content check variables for Timeout
-		if [ "x$4" == "x" ]; then
-			timeoutend=1
-		else
-			timeoutend=$4
-		fi
-		timecounter=0
-
-		while [  $timecounter -lt $timeoutend ]; do
-			let timecounter=timecounter+1
-
-			count=$(cat ${RSYSLOG_OUT_LOG} | grep -F "$2" | wc -l)
-
-			if [ $count -eq $3 ]; then
-				echo content-check-with-count success, \"$2\" occured $3 times
-				break
-			else
-				if [ "x$timecounter" == "x$timeoutend" ]; then
-					shutdown_when_empty # shut down rsyslogd
-					wait_shutdown	# Shutdown rsyslog instance on error 
-
-					echo content-check-with-count failed, expected \"$2\" to occur $3 times, but found it $count times
-					echo file ${RSYSLOG_OUT_LOG} content is:
-					sort < ${RSYSLOG_OUT_LOG}
-					error_exit 1
-				else
-					echo content-check-with-count have $count, wait for $3 times $2...
-					$TESTTOOL_DIR/msleep 1000
-				fi
-			fi
-		done
 		;;
 	 'block-stats-flush')
 		echo blocking stats flush
@@ -902,29 +1048,18 @@ case $1 in
 		done
 		echo "dyn-stats reset for bucket ${3} registered"
 		;;
-   'content-check-regex')
-		# this does a content check which permits regex
-		grep "$2" $3 -q
-		if [ "$?" -ne "0" ]; then
-		    echo "----------------------------------------------------------------------"
-		    echo FAIL: content-check-regex failed to find "'$2'" inside "'$3'"
-		    echo "file contents:"
-		    cat $3
-		    error_exit 1
-		fi
-		;;
-   'custom-content-check') 
-   		set -x
-		#cat $3 | grep -qF "$2"
-		cat $3 | grep -F "$2"
-		if [ "$?" -ne "0" ]; then
-		    echo FAIL: custom-content-check failed to find "'$2'" inside "'$3'"
-		    echo "file contents:"
-		    cat $3
-		    error_exit 1
-		fi
-		set +x
-		;;
+# note needed at the moment, but let's keep it in a little, 2018-09-03 rgerhards
+#   'content-check-regex')
+#		# this does a content check which permits regex
+#		grep "$2" $3 -q
+#		if [ "$?" -ne "0" ]; then
+#		    echo "----------------------------------------------------------------------"
+#		    echo FAIL: content-check-regex failed to find "'$2'" inside "'$3'"
+#		    echo "file contents:"
+#		    cat $3
+#		    error_exit 1
+#		fi
+#		;;
    'first-column-sum-check') 
 		sum=$(cat $4 | grep $3 | sed -e $2 | awk '{s+=$1} END {print s}')
 		if [ "x${sum}" != "x$5" ]; then
@@ -949,37 +1084,9 @@ case $1 in
 		if [ "$?" -ne "0" ]; then
 		    echo content-check failed, not every line matched pattern "'$2'"
 		    echo "file contents:"
-		    cat $4
+		    cat -n $4
 		    error_exit 1
 		fi
-		;;
-   'assert-content-missing') 
-		cat ${RSYSLOG_OUT_LOG} | grep -qF "$2"
-		if [ "$?" -eq "0" ]; then
-				echo content-missing assertion failed, some line matched pattern "'$2'"
-		    error_exit 1
-		fi
-		;;
-   'custom-assert-content-missing') 
-		cat $3 | grep -qF "$2"
-		if [ "$?" -eq "0" ]; then
-				echo content-missing assertion failed, some line in "'$3'" matched pattern "'$2'"
-		    error_exit 1
-		fi
-		;;
-   'setzcat')   # find out name of zcat tool
-		if [ `uname` == SunOS ]; then
-		   ZCAT=gzcat
-		else
-		   ZCAT=zcat
-		fi
-		;;
-   'generate-HOSTNAME')   # generate the HOSTNAME file
-		startup gethostname.conf
-		tcpflood -m1 -M "\"<128>\""
-		$TESTTOOL_DIR/msleep 100
-		shutdown_when_empty # shut down rsyslogd when done processing messages
-		wait_shutdown	# we need to wait until rsyslogd is finished!
 		;;
    'require-journalctl')   # check if journalctl exists on the system
 		if ! hash journalctl 2>/dev/null ; then
@@ -1064,6 +1171,8 @@ case $1 in
 		$TESTTOOL_DIR/msleep 2000
 		;;
 	 'start-kafka')
+		# Force IPv4 usage of Kafka!
+		export KAFKA_OPTS="-Djava.net.preferIPv4Stack=True"
 		if [ "x$2" == "x" ]; then
 			dep_work_dir=$(readlink -f .dep_wrk)
 			dep_work_kafka_config="kafka-server.properties"
@@ -1144,7 +1253,6 @@ case $1 in
 			rm -f $dep_work_dir/es/config/elasticsearch.yml
 			sed "s/^http.port:.*\$/http.port: ${ES_PORT}/" $srcdir/testsuites/$dep_work_es_config > $dep_work_dir/es/config/elasticsearch.yml
 		else
-			cp -f $srcdir/testsuites/diag-common.conf diag-common.conf
 			cp -f $srcdir/testsuites/$dep_work_es_config $dep_work_dir/es/config/elasticsearch.yml
 		fi
 
@@ -1287,7 +1395,9 @@ case $1 in
 				echo "Topic-name not provided."
 				exit 1
 		fi
-		(cd $dep_work_dir/kafka && ./bin/kafka-topics.sh --create --zookeeper localhost:$dep_work_port/kafka --topic $2 --partitions 2 --replication-factor 1)
+		(cd $dep_work_dir/kafka && ./bin/kafka-topics.sh --zookeeper localhost:$dep_work_port/kafka --create --topic $2 --replication-factor 1 --partitions 2 )
+		(cd $dep_work_dir/kafka && ./bin/kafka-topics.sh --zookeeper localhost:$dep_work_port/kafka --alter --topic $2 --delete-config retention.ms)
+		(cd $dep_work_dir/kafka && ./bin/kafka-topics.sh --zookeeper localhost:$dep_work_port/kafka --alter --topic $2 --delete-config retention.bytes)
 		;;
 	 'delete-kafka-topic')
 		if [ "x$3" == "x" ]; then
@@ -1353,5 +1463,6 @@ case $1 in
 			exit 77 # no inotify available, skip this test
 		fi
 		;;
-   *)		echo "invalid argument" $1
+   *)		echo "TESTBENCH error: invalid argument" $1
+		exit 100
 esac

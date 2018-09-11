@@ -23,7 +23,6 @@
  * limitations under the License.
  */
 #include "config.h"
-#include "rsyslog.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -40,6 +39,7 @@
 #include <fcntl.h>
 #include <zlib.h>
 #include <pthread.h>
+#include "rsyslog.h"
 #include "syslogd.h"
 #include "conf.h"
 #include "syslogd-types.h"
@@ -1139,8 +1139,6 @@ CODESTARTnewActInst
 
 	pvals = nvlstGetParams(lst, &actpblk, NULL);
 	if(pvals == NULL) {
-		LogError(0, RS_RET_MISSING_CNFPARAMS, "omfwd: either the \"file\" or "
-				"\"dynfile\" parameter must be given");
 		ABORT_FINALIZE(RS_RET_MISSING_CNFPARAMS);
 	}
 

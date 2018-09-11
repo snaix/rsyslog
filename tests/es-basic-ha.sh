@@ -15,7 +15,7 @@ template(name="tpl" type="string"
 
 
 ruleset(name="stats") {
-  action(type="omfile" file="./rsyslog.out.stats.log")
+  action(type="omfile" file="'${RSYSLOG_DYNNAME}'.out.stats.log")
 }
 module(load="../plugins/impstats/.libs/impstats" interval="1" severity="7" resetCounters="off" Ruleset="stats" bracketing="on" format="json")
 
@@ -27,14 +27,14 @@ module(load="../plugins/omelasticsearch/.libs/omelasticsearch")
 				 searchIndex="rsyslog_testbench")
 '
 startup
-. $srcdir/diag.sh injectmsg  0 100
-. $srcdir/diag.sh wait-queueempty
-. $srcdir/diag.sh wait-for-stats-flush 'rsyslog.out.stats.log'
+injectmsg  0 100
+wait_queueempty
+. $srcdir/diag.sh wait-for-stats-flush ${RSYSLOG_DYNNAME}.out.stats.log
 shutdown_when_empty
 wait_shutdown 
 . $srcdir/diag.sh es-getdata 100 19200
 seq_check  0 99
 # The configuration makes every other request from message #3 fail checkConn (N/2-1)
-. $srcdir/diag.sh custom-content-check '"failed.checkConn": 49' 'rsyslog.out.stats.log'
+custom_content_check '"failed.checkConn": 49' "${RSYSLOG_DYNNAME}.out.stats.log"
 . $srcdir/diag.sh cleanup-elasticsearch
 exit_test

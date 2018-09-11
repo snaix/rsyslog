@@ -17,15 +17,15 @@ $RepeatedMsgReduction off
 # second action should never execute
 :msg, contains, "msgnum:" /dev/null
 $ActionExecOnlyWhenPreviousIsSuspended on
-& ./rsyslog.out.log
+& ./'"${RSYSLOG_OUT_LOG}"'
 '
 startup_vg
-. $srcdir/diag.sh injectmsg  0 5000
+injectmsg  0 5000
 echo doing shutdown
 shutdown_when_empty
 echo wait on shutdown
 wait_shutdown_vg
-. $srcdir/diag.sh check-exit-vg
+check_exit_vg
 # now we need our custom logic to see if the result file is empty
 # (what it should be!)
 cmp $RSYSLOG_OUT_LOG /dev/null

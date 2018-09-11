@@ -6,7 +6,7 @@ generate_conf
 add_conf '
 module(load="../plugins/imtcp/.libs/imtcp")
 module(load="../plugins/fmhttp/.libs/fmhttp")
-input(type="imtcp" port="13514")
+input(type="imtcp" port="'$TCPFLOOD_PORT'")
 
 # for debugging the test itself:
 #template(name="outfmt" type="string" string="%$!%:  :%$.%:  %rawmsg%\n")
@@ -22,7 +22,7 @@ startup_vg
 tcpflood -m10
 shutdown_when_empty
 wait_shutdown_vg
-. $srcdir/diag.sh check-exit-vg
+check_exit_vg
 echo '{ "reply": "msgnum:00000000:" }
 { "reply": "msgnum:00000001:" }
 { "reply": "msgnum:00000002:" }

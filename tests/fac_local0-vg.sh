@@ -13,7 +13,7 @@ fi
 generate_conf
 add_conf '
 module(load="../plugins/imtcp/.libs/imtcp")
-input(type="imtcp" port="13514")
+input(type="imtcp" port="'$TCPFLOOD_PORT'")
 
 template(type="string" name="outfmt" string="%msg:F,58:2%,%msg:F,58:3%,%msg:F,58:4%\n")
 if $syslogfacility-text == "local0" then
@@ -23,6 +23,6 @@ startup_vg
 tcpflood -m1000 -P 129
 shutdown_when_empty
 wait_shutdown_vg
-. $srcdir/diag.sh check-exit-vg
+check_exit_vg
 seq_check 0 999 
 exit_test

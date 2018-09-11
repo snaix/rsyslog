@@ -14,7 +14,7 @@ generate_conf
 add_conf '
 $ModLoad ../plugins/imtcp/.libs/imtcp
 $MainMsgQueueTimeoutShutdown 10000
-$InputTCPServerRun 13514
+$InputTCPServerRun '$TCPFLOOD_PORT'
 
 $ActionWriteAllMarkMessages on
 
@@ -30,6 +30,6 @@ tcpflood -m10 -i1
 ./msleep 1500
 shutdown_when_empty # shut down rsyslogd when done processing messages
 wait_shutdown_vg
-. $srcdir/diag.sh check-exit-vg
+check_exit_vg
 seq_check 2 10
 exit_test

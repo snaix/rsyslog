@@ -13,7 +13,7 @@ template(name="outfmt" type="string" string="%$!iplocation%\n")
 module(load="../plugins/mmdblookup/.libs/mmdblookup")
 module(load="../plugins/mmnormalize/.libs/mmnormalize")
 module(load="../plugins/imptcp/.libs/imptcp")
-input(type="imptcp" port="13514" ruleset="testing")
+input(type="imptcp" port="'$TCPFLOOD_PORT'" ruleset="testing")
 
 ruleset(name="testing") {
 	action(type="mmnormalize" rulebase=`echo $srcdir/mmdb.rb`)
@@ -24,6 +24,6 @@ startup_vg
 tcpflood -m 100 -j "202.106.0.20\ "
 shutdown_when_empty
 wait_shutdown_vg
-. $srcdir/diag.sh check-exit-vg
-. $srcdir/diag.sh content-check '{ "city": "Beijing" }'
+check_exit_vg
+content_check '{ "city": "Beijing" }'
 exit_test 

@@ -17,13 +17,13 @@ fi
 generate_conf
 add_conf '
 module(load="../plugins/imtcp/.libs/imtcp")
-input(type="imtcp" port="13514" ruleset="rs")
+input(type="imtcp" port="'$TCPFLOOD_PORT'" ruleset="rs")
 
 
 template(name="outfmt" type="string" string="%msg:F,58:2%\n")
 
 ruleset(name="rs2" queue.type="disk" queue.filename="rs2_q"
-	queue.spoolDirectory="test-spool") {
+	queue.spoolDirectory="'${RSYSLOG_DYNNAME}'.spool") {
 	set $!tmp=$msg;
 	action(type="omfile" file=`echo $RSYSLOG_OUT_LOG` template="outfmt")
 }

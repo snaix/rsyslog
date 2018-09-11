@@ -24,11 +24,11 @@ if $msg contains "msgnum" then {
 }
 '
 startup_vg
-. $srcdir/diag.sh injectmsg  0 5000
+injectmsg  0 5000
 echo doing shutdown
 shutdown_when_empty
 echo wait on shutdown
 wait_shutdown_vg
-. $srcdir/diag.sh check-exit-vg
+check_exit_vg
 seq_check  0 4999
 exit_test

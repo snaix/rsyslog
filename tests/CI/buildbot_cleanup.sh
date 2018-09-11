@@ -4,3 +4,22 @@
 # in which case autotools unfortunately does not provide us a way to
 # gather error information.
 rm -f tests/*.sh.log
+
+# cleanup of hanging instances from previous runs
+# practice has shown this is pretty useful!
+for pid in $(ps -eo pid,args|grep '/tools/[r]syslogd ' |sed -e 's/\( *\)\([0-9]*\).*/\2/');
+do
+	echo "ERROR: left-over previous instance $pid, killing it"
+	ps -fp $pid
+	pwd
+	kill -9 $pid
+done
+
+# now the same for mmkubernetes_test_server
+set -v
+for pid in $(ps -eo pid,args|grep '\./mmkubernetes_test_server.py ' |sed -e 's/\( *\)\([0-9]*\).*/\2/');
+do
+	echo "ERROR: left-over previous instance $pid, killing it"
+	ps -fp $pid
+	kill -9 $pid || exit 0
+done

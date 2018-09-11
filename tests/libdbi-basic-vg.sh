@@ -17,10 +17,10 @@ $ActionLibdbiDBName Syslog
 '
 mysql --user=rsyslog --password=testbench < testsuites/mysql-truncate.sql
 startup_vg_noleak
-. $srcdir/diag.sh injectmsg  0 5000
+injectmsg  0 5000
 shutdown_when_empty
 wait_shutdown_vg
-. $srcdir/diag.sh check-exit-vg
+check_exit_vg
 # note "-s" is requried to suppress the select "field header"
 mysql -s --user=rsyslog --password=testbench < testsuites/mysql-select-msg.sql > $RSYSLOG_OUT_LOG
 seq_check  0 4999

@@ -10,7 +10,7 @@ add_conf '
 $MainMsgQueueTimeoutShutdown 10000
 
 module(load="../plugins/imtcp/.libs/imtcp")
-input(type="imtcp" port="13514")
+input(type="imtcp" port="'$TCPFLOOD_PORT'")
 
 template(name="outfmt" type="string" string="%$/msgnum%\n")
 template(name="dynfile" type="string" string=`echo $RSYSLOG_OUT_LOG`) /* trick to use relative path names! */
@@ -26,7 +26,7 @@ if $msg contains "msgnum:" then {
 startup
 
 # 40000 messages should be enough
-. $srcdir/diag.sh injectmsg  0 40000
+injectmsg  0 40000
 
 shutdown_when_empty # shut down rsyslogd when done processing messages
 wait_shutdown 

@@ -25,9 +25,8 @@ if $msg contains "msgnum:" then
 action(type="omfile" file=`echo $RSYSLOG_OUT_LOG`)
 '
 
-# . $srcdir/diag.sh es-init
 startup
-. $srcdir/diag.sh injectmsg  0 1
+injectmsg  0 1
 shutdown_when_empty
 wait_shutdown
 if grep -q "omelasticsearch: writeoperation '1' requires bulkid"  $RSYSLOG_OUT_LOG ; then
@@ -38,7 +37,6 @@ else
 	error_exit 1
 fi
 
-. $srcdir/diag.sh init
 generate_conf
 add_conf '
 template(name="tpl" type="string"
@@ -57,9 +55,8 @@ if $msg contains "msgnum:" then
 action(type="omfile" file=`echo $RSYSLOG_OUT_LOG`)
 '
 
-# . $srcdir/diag.sh es-init
 startup
-. $srcdir/diag.sh injectmsg  0 1
+injectmsg  0 1
 shutdown_when_empty
 wait_shutdown
 if grep -q "omelasticsearch: invalid value 'unknown' for writeoperation"  $RSYSLOG_OUT_LOG ; then
@@ -70,7 +67,6 @@ else
 	error_exit 1
 fi
 
-. $srcdir/diag.sh init
 generate_conf
 add_conf '
 template(name="tpl" type="string"
@@ -99,7 +95,7 @@ export ES_PORT=19200
 #export RSYSLOG_DEBUG="debug nostdout noprintmutexaction"
 #export RSYSLOG_DEBUGLOG="debug.log"
 startup
-. $srcdir/diag.sh injectmsg  0 1
+injectmsg  0 1
 shutdown_when_empty
 wait_shutdown
 . $srcdir/diag.sh es-getdata 1 $ES_PORT

@@ -15,10 +15,10 @@ generate_conf
 add_conf '
 $ModLoad ../plugins/imtcp/.libs/imtcp
 $MainMsgQueueTimeoutShutdown 10000
-$InputTCPServerRun 13514
+$InputTCPServerRun '$TCPFLOOD_PORT'
 
 # set spool locations and switch queue to disk assisted mode
-$WorkDirectory test-spool
+$WorkDirectory '$RSYSLOG_DYNNAME'.spool
 $MainMsgQueueSize 200 # this *should* trigger moving on to DA mode...
 # note: we must set QueueSize sufficiently high, so that 70% (light delay mark)
 # is high enough above HighWatermark!
@@ -34,17 +34,17 @@ template(name="dynfile" type="string" string=`echo $RSYSLOG_OUT_LOG`) # trick to
 startup
 
 # part1: send first 50 messages (in memory, only)
-#tcpflood 127.0.0.1 13514 1 50
-. $srcdir/diag.sh injectmsg 0 50
-. $srcdir/diag.sh wait-queueempty # let queue drain for this test case
+#tcpflood 127.0.0.1 '$TCPFLOOD_PORT' 1 50
+injectmsg 0 50
+wait_queueempty # let queue drain for this test case
 
 # part 2: send bunch of messages. This should trigger DA mode
-#. $srcdir/diag.sh injectmsg 50 20000
-. $srcdir/diag.sh injectmsg 50 2000
-ls -l test-spool	 # for manual review
+#injectmsg 50 20000
+injectmsg 50 2000
+ls -l ${RSYSLOG_DYNNAME}.spool	 # for manual review
 
 # send another handful
-. $srcdir/diag.sh injectmsg 2050 50
+injectmsg 2050 50
 #sleep 1 # we need this so that rsyslogd can receive all outstanding messages
 
 # clean up and check test result

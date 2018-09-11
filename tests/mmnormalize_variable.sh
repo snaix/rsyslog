@@ -10,7 +10,7 @@ template(name="outfmt" type="string" string="h:%$!hr% m:%$!min% s:%$!sec%\n")
 
 module(load="../plugins/mmnormalize/.libs/mmnormalize")
 module(load="../plugins/imptcp/.libs/imptcp")
-input(type="imptcp" port="13514")
+input(type="imptcp" port="'$TCPFLOOD_PORT'")
 
 template(name="time_fragment" type="list") {
   property(name="msg" regex.Expression="[0-9]{2}:[0-9]{2}:[0-9]{2} [A-Z]+" regex.Type="ERE" regex.Match="0")
@@ -27,5 +27,5 @@ echo doing shutdown
 shutdown_when_empty
 echo wait on shutdown
 wait_shutdown 
-. $srcdir/diag.sh content-check  "h:13 m:20 s:18"
+content_check  "h:13 m:20 s:18"
 exit_test

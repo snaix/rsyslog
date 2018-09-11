@@ -23,20 +23,20 @@ action(type="omfile" file=`echo $RSYSLOG_OUT_LOG` template="outfmt")
 '
 cp -f $srcdir/testsuites/xlate.lkp_tbl xlate.lkp_tbl
 startup
-. $srcdir/diag.sh injectmsg  0 3
-. $srcdir/diag.sh wait-queueempty
-. $srcdir/diag.sh content-check "msgnum:00000000: foo_old"
-. $srcdir/diag.sh content-check "msgnum:00000001: bar_old"
-. $srcdir/diag.sh assert-content-missing "baz"
+injectmsg  0 3
+wait_queueempty
+content_check "msgnum:00000000: foo_old"
+content_check "msgnum:00000001: bar_old"
+assert_content_missing "baz"
 cp -f $srcdir/testsuites/xlate_more.lkp_tbl xlate.lkp_tbl
-. $srcdir/diag.sh issue-HUP
-. $srcdir/diag.sh await-lookup-table-reload
-. $srcdir/diag.sh injectmsg  0 3
+issue_HUP
+await_lookup_table_reload
+injectmsg  0 3
 echo doing shutdown
 shutdown_when_empty
 echo wait on shutdown
 wait_shutdown
-. $srcdir/diag.sh assert-content-missing "foo_new"
-. $srcdir/diag.sh assert-content-missing "bar_new"
-. $srcdir/diag.sh assert-content-missing "baz"
+assert_content_missing "foo_new"
+assert_content_missing "bar_new"
+assert_content_missing "baz"
 exit_test
