@@ -313,6 +313,8 @@ static struct cnfparamblk inppblk =
 	  inppdescr
 	};
 
+static pthread_mutex_t hup_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 #include "im-helper.h" /* must be included AFTER the type definitions! */
 
 
@@ -2626,6 +2628,46 @@ CODESTARTmodExit
 	#endif
 ENDmodExit
 
+static void
+act_obj_state_sync_all(act_obj_t *act)
+{
+	while(act != NULL) {
+		DBGPRINTF("act_obj_state_sync: act %p '%s', wd %d, pStrm %p, in_move %d\n",
+		act, act->name, act->wd, act->pStrm, act->in_move);
+		if(act->pStrm != NULL) {
+			persistStrmState(act);
+		}
+		act = act->next;
+	}
+}
+
+static void
+fs_node_state_sync(fs_node_t *const node)
+{
+	fs_edge_t *edge;
+	for(edge = node->edges ; edge != NULL ; ) {
+		fs_node_state_sync(edge->node);
+		act_obj_state_sync_all(edge->active);
+		edge = edge->next;
+	}
+}
+
+/* to use HUP, we need to have an instanceData type, as this was
+ * originally designed for actions. However, we do not, and cannot,
+ * use the content. The core will always provide a NULL pointer.
+ */
+typedef struct _instanceData {
+	int dummy;
+} instanceData;
+BEGINdoHUP
+CODESTARTdoHUP
+	fs_node_t *const node = runModConf->conf_tree;
+	DBGPRINTF("doHUP node: %p edges:\n", node);
+	pthread_mutex_lock(&hup_mutex);
+	fs_node_state_sync(node);
+	pthread_mutex_unlock(&hup_mutex);
+
+ENDdoHUP
 
 BEGINqueryEtryPt
 CODESTARTqueryEtryPt
@@ -2634,6 +2676,7 @@ CODEqueryEtryPt_STD_CONF2_QUERIES
 CODEqueryEtryPt_STD_CONF2_setModCnf_QUERIES
 CODEqueryEtryPt_STD_CONF2_IMOD_QUERIES
 CODEqueryEtryPt_IsCompatibleWithFeature_IF_OMOD_QUERIES
+CODEqueryEtryPt_doHUP
 ENDqueryEtryPt
 
 
